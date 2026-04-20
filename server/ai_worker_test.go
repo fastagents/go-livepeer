@@ -218,15 +218,22 @@ func TestRunAIJob(t *testing.T) {
 			expectedOutputs: 1,
 		},
 		{
+			name:            "LiveVideoToVideo_Success",
+			notify:          createAIJob(10, "live-video-to-video", modelId, ""),
+			pipeline:        "live-video-to-video",
+			expectedErr:     "",
+			expectedOutputs: 0,
+		},
+		{
 			name:            "UnsupportedPipeline",
-			notify:          createAIJob(10, "unsupported-pipeline", modelId, ""),
+			notify:          createAIJob(11, "unsupported-pipeline", modelId, ""),
 			pipeline:        "unsupported-pipeline",
 			expectedErr:     "AI request validation failed for",
 			expectedOutputs: 0,
 		},
 		{
 			name:            "InvalidRequestData",
-			notify:          createAIJob(11, "text-to-image-invalid", modelId, ""),
+			notify:          createAIJob(12, "text-to-image-invalid", modelId, ""),
 			pipeline:        "text-to-image",
 			expectedErr:     "AI request validation failed for",
 			expectedOutputs: 0,
@@ -343,6 +350,9 @@ func TestRunAIJob(t *testing.T) {
 					var respFile bytes.Buffer
 					worker.ReadAudioB64DataUrl(expectedResp.Audio.Url, &respFile)
 					assert.Equal(len(results.Files[audResp.Audio.Url]), respFile.Len())
+				case "live-video-to-video":
+					assert.Equal("10", headers.Get("TaskId"))
+					assert.Equal(len(results.Files), 0)
 				}
 			}
 		})
@@ -382,6 +392,8 @@ func createAIJob(taskId int64, pipeline, modelId, inputUrl string) *net.NotifyAI
 		desc := "a young adult"
 		text := "let me tell you a story"
 		req = worker.GenTextToSpeechJSONRequestBody{Description: &desc, ModelId: &modelId, Text: &text}
+	case "live-video-to-video":
+		req = worker.GenLiveVideoToVideoJSONRequestBody{ModelId: &modelId}
 	case "unsupported-pipeline":
 		req = worker.GenTextToImageJSONRequestBody{Prompt: "test prompt", ModelId: &modelId}
 	case "text-to-image-invalid":
