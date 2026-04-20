@@ -250,6 +250,37 @@ func (rwm *RemoteAIWorkerManager) workerHasCapacity(pipeline, modelID string) bo
 	return false
 }
 
+func (rwm *RemoteAIWorkerManager) GetLiveAICapacity(pipeline, modelID string) worker.Capacity {
+	cap, err := PipelineToCapability(pipeline)
+	if err != nil {
+		return worker.Capacity{}
+	}
+
+	rwm.RWmutex.Lock()
+	defer rwm.RWmutex.Unlock()
+
+	var idle int
+	for _, remoteWorker := range rwm.remoteAIWorkers {
+		if _, ok := rwm.liveAIWorkers[remoteWorker.stream]; !ok {
+			continue
+		}
+
+		constraints, ok := remoteWorker.capabilities.constraints.perCapability[cap]
+		if !ok {
+			continue
+		}
+
+		model, ok := constraints.Models[modelID]
+		if !ok || model == nil {
+			continue
+		}
+
+		idle += model.Capacity
+	}
+
+	return worker.Capacity{ContainersIdle: idle}
+}
+
 // completeAIRequest end a AI request session for a remote ai worker
 // caller should hold the mutex lock
 func (rwm *RemoteAIWorkerManager) completeAIRequest(requestID, pipeline, modelID string) {
@@ -441,7 +472,13 @@ func (orch *orchestrator) CheckAICapacity(pipeline, modelID string) (bool, chan<
 }
 
 func (orch *orchestrator) GetLiveAICapacity(pipeline, modelID string) worker.Capacity {
-	return orch.node.AIWorker.GetLiveAICapacity(pipeline, modelID)
+	if orch.node.AIWorker != nil {
+		return orch.node.AIWorker.GetLiveAICapacity(pipeline, modelID)
+	}
+	if orch.node.AIWorkerManager != nil {
+		return orch.node.AIWorkerManager.GetLiveAICapacity(pipeline, modelID)
+	}
+	return worker.Capacity{}
 }
 
 func (orch *orchestrator) WorkerHardware() []worker.HardwareInformation {
