@@ -545,6 +545,37 @@ func TestCheckAICapacity(t *testing.T) {
 	assert.False(t, hasCapacity)
 	assert.Nil(t, releaseCapacity)
 }
+
+func TestGetLiveAICapacityWithRemoteAIWorkers(t *testing.T) {
+	n, _ := NewLivepeerNode(nil, "", nil)
+	o := NewOrchestrator(n, nil)
+	o.node.AIWorkerManager = NewRemoteAIWorkerManager()
+
+	liveStrm := &StubAIWorkerServer{manager: o.node.AIWorkerManager}
+	liveCaps := createAIWorkerCapabilities()
+	liveCaps.constraints.perCapability[Capability_TextToImage].Models["livepeer/model1"].Capacity = 2
+	liveWorker := NewRemoteAIWorker(o.node.AIWorkerManager, liveStrm, liveCaps, nil)
+
+	staleStrm := &StubAIWorkerServer{manager: o.node.AIWorkerManager}
+	staleCaps := createAIWorkerCapabilities()
+	staleCaps.constraints.perCapability[Capability_TextToImage].Models["livepeer/model1"].Capacity = 5
+	staleWorker := NewRemoteAIWorker(o.node.AIWorkerManager, staleStrm, staleCaps, nil)
+
+	o.node.AIWorkerManager.remoteAIWorkers = []*RemoteAIWorker{liveWorker, staleWorker}
+	o.node.AIWorkerManager.liveAIWorkers[liveStrm] = liveWorker
+
+	capacity := o.GetLiveAICapacity("text-to-image", "livepeer/model1")
+	assert.Equal(t, 2, capacity.ContainersIdle)
+	assert.Equal(t, 0, capacity.ContainersInUse)
+
+	capacity = o.GetLiveAICapacity("text-to-image", "missing-model")
+	assert.Equal(t, worker.Capacity{}, capacity)
+
+	o.node.AIWorkerManager = nil
+	capacity = o.GetLiveAICapacity("text-to-image", "livepeer/model1")
+	assert.Equal(t, worker.Capacity{}, capacity)
+}
+
 func TestRemoteAIWorkerProcessPipelines(t *testing.T) {
 	drivers.NodeStorage = drivers.NewMemoryDriver(nil)
 	n, _ := NewLivepeerNode(nil, "", nil)
