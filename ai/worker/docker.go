@@ -649,17 +649,34 @@ func (m *DockerManager) watchContainer(rc *RunnerContainer) {
 			m.returnContainer(rc)
 			continue
 		case <-ticker.C:
+			isBorrowed := borrowCtx() != nil
 			ctx, cancel := context.WithTimeout(context.Background(), healthcheckTimeout)
 			health, err := rc.Client.HealthWithResponse(ctx)
 			cancel()
 
 			if err != nil {
+				if isBorrowed {
+					// Some live-video runners do not answer /health while the
+					// inference process owns the event loop. Do not kill an
+					// active paid stream for a watchdog-only timeout.
+					slog.Warn("Ignoring runner health error while container is borrowed",
+						slog.String("container", rc.Name),
+						slog.String("error", err.Error()))
+					continue
+				}
 				failures++
 				slog.Error("Error getting health for runner",
 					slog.String("container", rc.Name),
 					slog.String("error", err.Error()))
 				continue
 			} else if health.StatusCode() != 200 {
+				if isBorrowed {
+					slog.Warn("Ignoring runner health HTTP failure while container is borrowed",
+						slog.String("container", rc.Name),
+						slog.Int("status_code", health.StatusCode()),
+						slog.String("body", string(health.Body)))
+					continue
+				}
 				failures++
 				slog.Error("Container health check failed with HTTP status code",
 					slog.String("container", rc.Name),
@@ -672,7 +689,6 @@ func (m *DockerManager) watchContainer(rc *RunnerContainer) {
 				slog.Any("JSON200", health.JSON200),
 				slog.String("body", string(health.Body)))
 
-			isBorrowed := borrowCtx() != nil
 			status := health.JSON200.Status
 			switch status {
 			case IDLE:
