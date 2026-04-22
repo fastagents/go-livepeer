@@ -943,6 +943,41 @@ func TestDockerManager_watchContainer(t *testing.T) {
 		}
 	})
 
+	t.Run("RecoverBorrowedContainerOnPersistentPipelineStatusFailure", func(t *testing.T) {
+		defer updateDuringTest(&healthcheckTimeout, 10*time.Millisecond)()
+		defer updateDuringTest(&maxBorrowedHardHealthCheckFailures, 2)()
+		defer updateDuringTest(&borrowedHardHealthCheckGracePeriod, 10*time.Millisecond)()
+
+		mockDockerClient, dockerManager, mockServer, rc := setup()
+		defer mockServer.Close()
+		defer mockDockerClient.AssertExpectations(t)
+		defer mockServer.AssertExpectations(t)
+
+		mockServer.On("ServeHTTP", "GET", "/health", mock.Anything).
+			Return(500, "application/json", `{"detail":{"msg":"Failed to retrieve pipeline status."}}`)
+
+		rc.BorrowCtx = context.Background()
+		dockerManager.gpuContainers[rc.GPU] = rc
+		delete(dockerManager.containers, rc.Name)
+
+		mockDockerClient.On("ContainerStop", mock.Anything, rc.Name, expectedContainerStopOptions).Return(nil).Once()
+		mockDockerClient.On("ContainerRemove", mock.Anything, rc.Name, mock.Anything).Return(nil).Once()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			dockerManager.watchContainer(rc)
+		}()
+		select {
+		case <-done:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("watchContainer did not recover persistent borrowed health failure")
+		}
+
+		require.NotContains(t, dockerManager.gpuContainers, rc.GPU)
+		require.NotContains(t, dockerManager.containers, rc.Name)
+	})
+
 	t.Run("RespectLoadingStateGracePeriod", func(t *testing.T) {
 		// Slightly below the time for 5 healthchecks, to avoid races
 		defer updateDuringTest(&containerTimeout, 45*time.Millisecond)()
