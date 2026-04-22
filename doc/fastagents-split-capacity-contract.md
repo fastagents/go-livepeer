@@ -39,3 +39,9 @@ The exact deployed-code tag is
 `777c0a1c` are documentation-only unless a newer deployed-code tag says
 otherwise, so a live binary reporting
 `0.8.10-777c0a1c` is expected and not stale.
+
+Related managed-runner recovery note:
+`doc/fastagents-borrowed-runner-recovery.md`. Split capacity accounting and
+borrowed-runner health recovery are separate concerns. Capacity reporting says
+which lanes should be advertised; recovery decides when a stuck borrowed local
+runner should be destroyed and re-warmed.
