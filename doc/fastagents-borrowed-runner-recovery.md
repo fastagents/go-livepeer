@@ -31,9 +31,30 @@ Commit `712f03cc` keeps the active-stream protection bounded:
   the existing managed-container destroy and warm path
 - `OK` or `IDLE` health resets the borrowed failure counters
 
+Commit `6cc5f5d1` extends that bounded path to transport errors such as
+`connect: connection refused`. The first recovery patch only classified hard
+failures after an HTTP response body existed; a killed borrowed container can
+fail before a response body is available. The follow-up patch classifies the
+Go error string too, so a killed borrowed runner uses the short hard-failure
+grace instead of the generic borrowed-runner grace.
+
 This is recovery code, not a split-capacity accounting change. It applies to
 managed local AI runner containers and can also matter for split-worker hosts
 that use the same private Livepeer manager code.
+
+## Sven Kill Test
+
+Controlled test on Sven `dd-us5:8938`:
+
+- old binary `712f03cc`: killing runner `8903` recovered, but only after the
+  generic borrowed-runner grace, about `5 minutes` before restart.
+- new binary `6cc5f5d1`: killing runner `8903` at `06:54:22 MDT` caused
+  connection-refused health failures, container removal/restart at `06:54:31`,
+  `LOADING` at `06:54:39`, and `IDLE` at `06:55:09`.
+
+The final post-patch MCP one-hour sample for `dd-us5:8938` showed `51`
+streams, `0` errors, `0` swaps, and `0` orchestrator timeouts. This is the
+expected recovery behavior for a killed borrowed managed runner.
 
 ## Required Audit
 
