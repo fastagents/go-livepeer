@@ -37,13 +37,14 @@ var aiWorkerRequestTimeout = 15 * time.Minute
 var aiWorkerTranscodeLoopTimeout = 70 * time.Second
 
 type RemoteAIWorker struct {
-	manager      *RemoteAIWorkerManager
-	stream       net.AIWorker_RegisterAIWorkerServer
-	capabilities *Capabilities
-	hardware     []worker.HardwareInformation
-	version      []worker.Version
-	eof          chan struct{}
-	addr         string
+	manager              *RemoteAIWorkerManager
+	stream               net.AIWorker_RegisterAIWorkerServer
+	capabilities         *Capabilities
+	registeredCapacities map[remoteAIWorkerCapacityKey]int
+	hardware             []worker.HardwareInformation
+	version              []worker.Version
+	eof                  chan struct{}
+	addr                 string
 }
 
 func (rw *RemoteAIWorker) done() {
@@ -65,18 +66,50 @@ type RemoteAIWorkerManager struct {
 	taskCount int64
 
 	// Map for keeping track of sessions and their respective aiworkers
-	requestSessions map[string]*RemoteAIWorker
+	requestSessions map[string]*remoteAIRequestSession
 }
 
 func NewRemoteAIWorker(m *RemoteAIWorkerManager, stream net.AIWorker_RegisterAIWorkerServer, caps *Capabilities, hardware []worker.HardwareInformation) *RemoteAIWorker {
 	return &RemoteAIWorker{
-		manager:      m,
-		stream:       stream,
-		eof:          make(chan struct{}, 1),
-		addr:         common.GetConnectionAddr(stream.Context()),
-		capabilities: caps,
-		hardware:     hardware,
+		manager:              m,
+		stream:               stream,
+		eof:                  make(chan struct{}, 1),
+		addr:                 common.GetConnectionAddr(stream.Context()),
+		capabilities:         caps,
+		registeredCapacities: snapshotRemoteAIWorkerCapacities(caps),
+		hardware:             hardware,
 	}
+}
+
+type remoteAIWorkerCapacityKey struct {
+	capability Capability
+	modelID    string
+}
+
+type remoteAIRequestSession struct {
+	worker               *RemoteAIWorker
+	pipeline             string
+	modelID              string
+	releaseOnDoneStarted bool
+}
+
+func snapshotRemoteAIWorkerCapacities(caps *Capabilities) map[remoteAIWorkerCapacityKey]int {
+	registeredCapacities := make(map[remoteAIWorkerCapacityKey]int)
+	if caps == nil {
+		return registeredCapacities
+	}
+	for cap, constraints := range caps.constraints.perCapability {
+		if constraints == nil {
+			continue
+		}
+		for modelID, model := range constraints.Models {
+			if model == nil || model.Capacity <= 0 {
+				continue
+			}
+			registeredCapacities[remoteAIWorkerCapacityKey{capability: cap, modelID: modelID}] = model.Capacity
+		}
+	}
+	return registeredCapacities
 }
 
 func NewRemoteAIWorkerManager() *RemoteAIWorkerManager {
@@ -88,7 +121,7 @@ func NewRemoteAIWorkerManager() *RemoteAIWorkerManager {
 		taskMutex: &sync.RWMutex{},
 		taskChans: make(map[int64]AIWorkerChan),
 
-		requestSessions: make(map[string]*RemoteAIWorker),
+		requestSessions: make(map[string]*remoteAIRequestSession),
 	}
 }
 
@@ -171,7 +204,11 @@ func (rwm *RemoteAIWorkerManager) Process(ctx context.Context, requestID string,
 		return rwm.Process(ctx, requestID, pipeline, modelID, fname, req)
 	}
 
-	rwm.completeAIRequest(requestID, pipeline, modelID)
+	if pipeline == "live-video-to-video" {
+		rwm.releaseAIRequestOnContextDone(ctx, requestID, pipeline, modelID)
+	} else {
+		rwm.completeAIRequest(requestID, pipeline, modelID)
+	}
 	return res, err
 }
 
@@ -184,8 +221,17 @@ func (rwm *RemoteAIWorkerManager) selectWorker(requestID string, pipeline string
 	}
 
 	findCompatibleWorker := func(rwm *RemoteAIWorkerManager) int {
-		cap, _ := PipelineToCapability(pipeline)
-		for idx, worker := range rwm.remoteAIWorkers {
+		cap, err := PipelineToCapability(pipeline)
+		if err != nil {
+			return -1
+		}
+		for idx := 0; idx < len(rwm.remoteAIWorkers); idx++ {
+			worker := rwm.remoteAIWorkers[idx]
+			if !rwm.isWorkerLiveLocked(worker) {
+				rwm.remoteAIWorkers = removeFromRemoteWorkers(worker, rwm.remoteAIWorkers)
+				idx--
+				continue
+			}
 			rwCap, hasCap := worker.capabilities.constraints.perCapability[cap]
 			if hasCap {
 				_, hasModel := rwCap.Models[modelID]
@@ -201,28 +247,29 @@ func (rwm *RemoteAIWorkerManager) selectWorker(requestID string, pipeline string
 	}
 
 	for checkWorkers(rwm) {
-		worker, sessionExists := rwm.requestSessions[requestID]
-		newWorker := findCompatibleWorker(rwm)
-		if newWorker == -1 {
-			return nil, ErrNoCompatibleWorkersAvailable
-		}
-		if !sessionExists {
-			worker = rwm.remoteAIWorkers[newWorker]
-		}
-
-		if _, ok := rwm.liveAIWorkers[worker.stream]; !ok {
-			// Remove the stream session because the worker is no longer live
-			if sessionExists {
-				rwm.completeAIRequest(requestID, pipeline, modelID)
+		session, sessionExists := rwm.requestSessions[requestID]
+		if sessionExists && session.pipeline == pipeline && session.modelID == modelID {
+			if rwm.isWorkerLiveLocked(session.worker) {
+				return session.worker, nil
 			}
-			// worker does not exist in table; remove and retry
-			rwm.remoteAIWorkers = removeFromRemoteWorkers(worker, rwm.remoteAIWorkers)
+			rwm.completeAIRequestLocked(requestID)
 			continue
 		}
-
-		if !sessionExists {
-			// Assigning worker to session for future use
-			rwm.requestSessions[requestID] = worker
+		if sessionExists {
+			rwm.completeAIRequestLocked(requestID)
+		}
+		newWorker := findCompatibleWorker(rwm)
+		if newWorker == -1 {
+			if len(rwm.remoteAIWorkers) == 0 {
+				return nil, ErrNoWorkersAvailable
+			}
+			return nil, ErrNoCompatibleWorkersAvailable
+		}
+		worker := rwm.remoteAIWorkers[newWorker]
+		rwm.requestSessions[requestID] = &remoteAIRequestSession{
+			worker:   worker,
+			pipeline: pipeline,
+			modelID:  modelID,
 		}
 		return worker, nil
 	}
@@ -231,11 +278,17 @@ func (rwm *RemoteAIWorkerManager) selectWorker(requestID string, pipeline string
 }
 
 func (rwm *RemoteAIWorkerManager) workerHasCapacity(pipeline, modelID string) bool {
+	rwm.RWmutex.Lock()
+	defer rwm.RWmutex.Unlock()
+
 	cap, err := PipelineToCapability(pipeline)
 	if err != nil {
 		return false
 	}
 	for _, worker := range rwm.remoteAIWorkers {
+		if !rwm.isWorkerLiveLocked(worker) {
+			continue
+		}
 		rw, hasCap := worker.capabilities.constraints.perCapability[cap]
 		if hasCap {
 			_, hasModel := rw.Models[modelID]
@@ -259,7 +312,7 @@ func (rwm *RemoteAIWorkerManager) GetLiveAICapacity(pipeline, modelID string) wo
 	rwm.RWmutex.Lock()
 	defer rwm.RWmutex.Unlock()
 
-	var idle int
+	var idle, inUse int
 	for _, remoteWorker := range rwm.remoteAIWorkers {
 		if _, ok := rwm.liveAIWorkers[remoteWorker.stream]; !ok {
 			continue
@@ -276,29 +329,79 @@ func (rwm *RemoteAIWorkerManager) GetLiveAICapacity(pipeline, modelID string) wo
 		}
 
 		idle += model.Capacity
+		registeredCapacity := remoteWorker.registeredCapacity(cap, modelID)
+		if registeredCapacity < model.Capacity {
+			registeredCapacity = model.Capacity
+		}
+		inUse += registeredCapacity - model.Capacity
 	}
 
-	return worker.Capacity{ContainersIdle: idle}
+	return worker.Capacity{
+		ContainersInUse: inUse,
+		ContainersIdle:  idle,
+	}
 }
 
-// completeAIRequest end a AI request session for a remote ai worker
-// caller should hold the mutex lock
+func (rwm *RemoteAIWorkerManager) isWorkerLiveLocked(worker *RemoteAIWorker) bool {
+	if worker == nil {
+		return false
+	}
+	_, ok := rwm.liveAIWorkers[worker.stream]
+	return ok
+}
+
+func (rw *RemoteAIWorker) registeredCapacity(cap Capability, modelID string) int {
+	if rw == nil {
+		return 0
+	}
+	return rw.registeredCapacities[remoteAIWorkerCapacityKey{capability: cap, modelID: modelID}]
+}
+
+func (rwm *RemoteAIWorkerManager) releaseAIRequestOnContextDone(ctx context.Context, requestID, pipeline, modelID string) {
+	rwm.RWmutex.Lock()
+	session, ok := rwm.requestSessions[requestID]
+	if !ok || session.releaseOnDoneStarted {
+		rwm.RWmutex.Unlock()
+		return
+	}
+	session.releaseOnDoneStarted = true
+	rwm.RWmutex.Unlock()
+
+	go func() {
+		<-ctx.Done()
+		rwm.completeAIRequest(requestID, pipeline, modelID)
+		glog.Infof("Released live AI remote worker capacity requestID=%s pipeline=%s model_id=%s", requestID, pipeline, modelID)
+	}()
+}
+
+// completeAIRequest ends an AI request session for a remote AI worker.
 func (rwm *RemoteAIWorkerManager) completeAIRequest(requestID, pipeline, modelID string) {
 	rwm.RWmutex.Lock()
 	defer rwm.RWmutex.Unlock()
 
-	worker, ok := rwm.requestSessions[requestID]
+	rwm.completeAIRequestLocked(requestID)
+}
+
+func (rwm *RemoteAIWorkerManager) completeAIRequestLocked(requestID string) {
+	session, ok := rwm.requestSessions[requestID]
 	if !ok {
 		return
 	}
+	worker := session.worker
+	pipeline := session.pipeline
+	modelID := session.modelID
 
 	for idx, remoteWorker := range rwm.remoteAIWorkers {
-		if worker.addr == remoteWorker.addr {
+		if worker == remoteWorker {
 			cap, err := PipelineToCapability(pipeline)
 			if err == nil {
 				if _, hasCap := rwm.remoteAIWorkers[idx].capabilities.constraints.perCapability[cap]; hasCap {
 					if _, hasModel := rwm.remoteAIWorkers[idx].capabilities.constraints.perCapability[cap].Models[modelID]; hasModel {
-						rwm.remoteAIWorkers[idx].capabilities.constraints.perCapability[cap].Models[modelID].Capacity += 1
+						model := rwm.remoteAIWorkers[idx].capabilities.constraints.perCapability[cap].Models[modelID]
+						registeredCapacity := rwm.remoteAIWorkers[idx].registeredCapacity(cap, modelID)
+						if registeredCapacity == 0 || model.Capacity < registeredCapacity {
+							model.Capacity += 1
+						}
 					}
 				}
 
