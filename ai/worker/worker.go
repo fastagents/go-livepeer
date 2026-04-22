@@ -62,7 +62,17 @@ func NewWorker(imageOverrides ImageOverrides, verboseLogs bool, gpus []string, m
 	}, nil
 }
 
+func NewExternalOnlyWorker() *Worker {
+	return &Worker{
+		externalContainers: make(map[string]*RunnerContainer),
+		mu:                 &sync.Mutex{},
+	}
+}
+
 func (w *Worker) HardwareInformation() []HardwareInformation {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	var hardware []HardwareInformation
 	for _, rc := range w.externalContainers {
 		if rc.Hardware != nil {
@@ -71,15 +81,37 @@ func (w *Worker) HardwareInformation() []HardwareInformation {
 			hardware = append(hardware, HardwareInformation{})
 		}
 	}
+
+	if w.manager == nil {
+		return hardware
+	}
+
 	return append(hardware, w.manager.HardwareInformation()...)
 }
 
 func (w *Worker) GetLiveAICapacity(pipeline, modelID string) Capacity {
+	w.mu.Lock()
+	externalIdle := 0
+	for _, rc := range w.externalContainers {
+		if (pipeline == "" || rc.Pipeline == pipeline) && (modelID == "" || rc.ModelID == modelID) {
+			externalIdle++
+		}
+	}
+	w.mu.Unlock()
+
+	if w.manager == nil {
+		return Capacity{ContainersIdle: externalIdle}
+	}
+
 	capacity, _ := w.manager.GetCapacity(pipeline, modelID)
+	capacity.ContainersIdle += externalIdle
 	return capacity
 }
 
 func (w *Worker) Version() []Version {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	var version []Version
 	for _, rc := range w.externalContainers {
 		if rc.Version != nil {
@@ -87,6 +119,10 @@ func (w *Worker) Version() []Version {
 		} else {
 			version = append(version, Version{})
 		}
+	}
+
+	if w.manager == nil {
+		return version
 	}
 
 	return append(version, w.manager.Version()...)
@@ -658,11 +694,18 @@ func (w *Worker) LiveVideoToVideo(ctx context.Context, req GenLiveVideoToVideoJS
 }
 
 func (w *Worker) EnsureImageAvailable(ctx context.Context, pipeline string, modelID string) error {
+	if w.manager == nil {
+		return nil
+	}
+
 	return w.manager.EnsureImageAvailable(ctx, pipeline, modelID)
 }
 
 func (w *Worker) Warm(ctx context.Context, pipeline string, modelID string, endpoint RunnerEndpoint, optimizationFlags OptimizationFlags) error {
 	if endpoint.URL == "" {
+		if w.manager == nil {
+			return fmt.Errorf("cannot warm managed AI runner without Docker manager")
+		}
 		return w.manager.Warm(ctx, pipeline, modelID, optimizationFlags)
 	}
 
@@ -689,8 +732,10 @@ func (w *Worker) Warm(ctx context.Context, pipeline string, modelID string, endp
 }
 
 func (w *Worker) Stop(ctx context.Context) error {
-	if err := w.manager.Stop(ctx); err != nil {
-		return err
+	if w.manager != nil {
+		if err := w.manager.Stop(ctx); err != nil {
+			return err
+		}
 	}
 
 	w.mu.Lock()
@@ -716,6 +761,10 @@ func (w *Worker) HasCapacity(pipeline, modelID string) bool {
 	}
 
 	// Check if we have capacity for managed containers.
+	if w.manager == nil {
+		return false
+	}
+
 	return w.manager.HasCapacity(context.Background(), pipeline, modelID)
 }
 
@@ -731,6 +780,10 @@ func (w *Worker) borrowContainer(ctx context.Context, pipeline, modelID string) 
 	}
 
 	w.mu.Unlock()
+
+	if w.manager == nil {
+		return nil, fmt.Errorf("no AI runner capacity for pipeline=%s modelID=%s", pipeline, modelID)
+	}
 
 	return w.manager.Borrow(ctx, pipeline, modelID)
 }
