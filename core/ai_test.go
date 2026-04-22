@@ -213,6 +213,7 @@ func TestSelectAIWorker(t *testing.T) {
 	testRequestId2 := "testID2"
 	testRequestId3 := "testID3"
 	testRequestId4 := "testID4"
+	testRequestId5 := "testID5"
 
 	// ai worker is returned from selectAIWorker
 	currentWorker, err := m.selectWorker(testRequestId, "text-to-image", "livepeer/model1")
@@ -220,6 +221,10 @@ func TestSelectAIWorker(t *testing.T) {
 	assert.NotNil(currentWorker)
 	assert.NotNil(m.liveAIWorkers[strm])
 	assert.Len(m.remoteAIWorkers, 2)
+	currentWorkerAgain, err := m.selectWorker(testRequestId, "text-to-image", "livepeer/model1")
+	assert.Nil(err)
+	assert.Equal(currentWorker, currentWorkerAgain)
+	assert.Equal(1, currentWorker.capabilities.constraints.perCapability[Capability_TextToImage].Models["livepeer/model1"].Capacity)
 	m.completeAIRequest(testRequestId, "text-to-image", "livepeer/model1")
 
 	// check selecting model for one pipeline does not impact other pipeline with same model
@@ -243,7 +248,7 @@ func TestSelectAIWorker(t *testing.T) {
 	assert.Equal(0, w2.capabilities.constraints.perCapability[Capability_TextToImage].Models["livepeer/model1"].Capacity)
 	assert.Equal(2, w2.capabilities.constraints.perCapability[Capability_TextToImage].Models["livepeer/model2"].Capacity)
 	// Capacity is zero for model, confirm no workers selected
-	w1, err = m.selectWorker(testRequestId, "text-to-image", "livepeer/model1")
+	w1, err = m.selectWorker(testRequestId5, "text-to-image", "livepeer/model1")
 	assert.Nil(w1)
 	assert.EqualError(err, ErrNoCompatibleWorkersAvailable.Error())
 	//return one capacity, check requestSessions is cleared for request_id
@@ -568,12 +573,55 @@ func TestGetLiveAICapacityWithRemoteAIWorkers(t *testing.T) {
 	assert.Equal(t, 2, capacity.ContainersIdle)
 	assert.Equal(t, 0, capacity.ContainersInUse)
 
+	_, err := o.node.AIWorkerManager.selectWorker("capacity-request", "text-to-image", "livepeer/model1")
+	assert.Nil(t, err)
+	capacity = o.GetLiveAICapacity("text-to-image", "livepeer/model1")
+	assert.Equal(t, 1, capacity.ContainersIdle)
+	assert.Equal(t, 1, capacity.ContainersInUse)
+
+	o.node.AIWorkerManager.completeAIRequest("capacity-request", "text-to-image", "livepeer/model1")
+	capacity = o.GetLiveAICapacity("text-to-image", "livepeer/model1")
+	assert.Equal(t, 2, capacity.ContainersIdle)
+	assert.Equal(t, 0, capacity.ContainersInUse)
+
 	capacity = o.GetLiveAICapacity("text-to-image", "missing-model")
 	assert.Equal(t, worker.Capacity{}, capacity)
 
 	o.node.AIWorkerManager = nil
 	capacity = o.GetLiveAICapacity("text-to-image", "livepeer/model1")
 	assert.Equal(t, worker.Capacity{}, capacity)
+}
+
+func TestRemoteLiveVideoCapacityHeldUntilContextDone(t *testing.T) {
+	m := NewRemoteAIWorkerManager()
+	strm := &StubAIWorkerServer{manager: m}
+	caps := createLiveVideoAIWorkerCapabilities("streamdiffusion-sdxl", 1)
+	wkr := NewRemoteAIWorker(m, strm, caps, nil)
+	m.remoteAIWorkers = []*RemoteAIWorker{wkr}
+	m.liveAIWorkers[strm] = wkr
+
+	modelID := "streamdiffusion-sdxl"
+	ctx, cancel := context.WithCancel(context.Background())
+	req := worker.GenLiveVideoToVideoJSONRequestBody{ModelId: &modelID}
+
+	_, err := m.Process(ctx, "live-request", "live-video-to-video", modelID, "", AIJobRequestData{Request: req})
+	assert.Nil(t, err)
+
+	capacity := m.GetLiveAICapacity("live-video-to-video", modelID)
+	assert.Equal(t, 0, capacity.ContainersIdle)
+	assert.Equal(t, 1, capacity.ContainersInUse)
+
+	_, err = m.selectWorker("live-request", "live-video-to-video", modelID)
+	assert.Nil(t, err)
+	capacity = m.GetLiveAICapacity("live-video-to-video", modelID)
+	assert.Equal(t, 0, capacity.ContainersIdle)
+	assert.Equal(t, 1, capacity.ContainersInUse)
+
+	cancel()
+	assert.Eventually(t, func() bool {
+		capacity = m.GetLiveAICapacity("live-video-to-video", modelID)
+		return capacity.ContainersIdle == 1 && capacity.ContainersInUse == 0
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestRemoteAIWorkerProcessPipelines(t *testing.T) {
@@ -671,6 +719,16 @@ func createAIWorkerCapabilities() *Capabilities {
 	constraints := make(PerCapabilityConstraints)
 	constraints[Capability_TextToImage] = &CapabilityConstraints{Models: make(ModelConstraints)}
 	constraints[Capability_TextToImage].Models["livepeer/model1"] = &ModelConstraint{Warm: true, Capacity: 2}
+	caps := NewCapabilities(DefaultCapabilities(), MandatoryOCapabilities())
+	caps.SetPerCapabilityConstraints(constraints)
+	caps.version = "1.0"
+	return caps
+}
+
+func createLiveVideoAIWorkerCapabilities(modelID string, capacity int) *Capabilities {
+	constraints := make(PerCapabilityConstraints)
+	constraints[Capability_LiveVideoToVideo] = &CapabilityConstraints{Models: make(ModelConstraints)}
+	constraints[Capability_LiveVideoToVideo].Models[modelID] = &ModelConstraint{Warm: true, Capacity: capacity}
 	caps := NewCapabilities(DefaultCapabilities(), MandatoryOCapabilities())
 	caps.SetPerCapabilityConstraints(constraints)
 	caps.version = "1.0"
