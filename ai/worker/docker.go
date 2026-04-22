@@ -667,24 +667,45 @@ func (m *DockerManager) watchContainer(rc *RunnerContainer) {
 					// Some live-video runners do not answer /health while the
 					// inference process owns the event loop. Do not kill an
 					// active paid stream for a short watchdog-only timeout.
-					if borrowedHealthFailures == 0 {
+					// Hard failures such as connection refused mean the runner
+					// process/container is already gone, so use the shorter
+					// hard-failure grace instead of holding capacity for the
+					// generic borrowed timeout.
+					isHardFailure := isPipelineStatusHealthFailure([]byte(err.Error()))
+					if isHardFailure {
+						if borrowedHardHealthFailures == 0 {
+							borrowedHardHealthFailureStart = time.Now()
+						}
+						borrowedHardHealthFailures++
+					} else if borrowedHealthFailures == 0 {
 						borrowedHealthFailureStart = time.Now()
 					}
-					borrowedHealthFailures++
-					if borrowedHealthFailures >= maxBorrowedHealthCheckFailures &&
-						time.Since(borrowedHealthFailureStart) >= borrowedHealthCheckGracePeriod {
+					if !isHardFailure {
+						borrowedHealthFailures++
+					}
+					hardFailureReady := isHardFailure &&
+						borrowedHardHealthFailures >= maxBorrowedHardHealthCheckFailures &&
+						time.Since(borrowedHardHealthFailureStart) >= borrowedHardHealthCheckGracePeriod
+					healthFailureReady := !isHardFailure &&
+						borrowedHealthFailures >= maxBorrowedHealthCheckFailures &&
+						time.Since(borrowedHealthFailureStart) >= borrowedHealthCheckGracePeriod
+					if hardFailureReady || healthFailureReady {
 						slog.Error("Borrowed runner health error persisted, restarting managed container",
 							slog.String("container", rc.Name),
+							slog.Bool("hard_failure", isHardFailure),
 							slog.Int("failures", borrowedHealthFailures),
-							slog.Duration("duration", time.Since(borrowedHealthFailureStart)),
+							slog.Int("hard_failures", borrowedHardHealthFailures),
+							slog.Duration("duration", borrowedHealthFailureDuration(isHardFailure, borrowedHealthFailureStart, borrowedHardHealthFailureStart)),
 							slog.String("error", err.Error()))
 						failures = maxHealthCheckFailures
 						continue
 					}
 					slog.Warn("Ignoring runner health error while container is borrowed",
 						slog.String("container", rc.Name),
+						slog.Bool("hard_failure", isHardFailure),
 						slog.Int("failures", borrowedHealthFailures),
-						slog.Duration("duration", time.Since(borrowedHealthFailureStart)),
+						slog.Int("hard_failures", borrowedHardHealthFailures),
+						slog.Duration("duration", borrowedHealthFailureDuration(isHardFailure, borrowedHealthFailureStart, borrowedHardHealthFailureStart)),
 						slog.String("error", err.Error()))
 					continue
 				}
@@ -795,6 +816,13 @@ func isPipelineStatusHealthFailure(body []byte) bool {
 	return strings.Contains(bodyText, "failed to retrieve pipeline status") ||
 		strings.Contains(bodyText, "failed to get status") ||
 		strings.Contains(bodyText, "connection refused")
+}
+
+func borrowedHealthFailureDuration(isHardFailure bool, healthStart, hardHealthStart time.Time) time.Duration {
+	if isHardFailure {
+		return time.Since(hardHealthStart)
+	}
+	return time.Since(healthStart)
 }
 
 func RemoveExistingContainers(ctx context.Context, client DockerClient, containerCreatorID string) (int, error) {
