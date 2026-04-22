@@ -474,6 +474,18 @@ func (cfg LivepeerConfig) PrintConfig(w io.Writer) {
 	paramTable.Render()
 }
 
+func aiModelConfigsExternalOnly(configs []core.AIModelConfig) bool {
+	if len(configs) == 0 {
+		return false
+	}
+	for _, config := range configs {
+		if config.URL == "" {
+			return false
+		}
+	}
+	return true
+}
+
 func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 	if *cfg.MaxSessions == "auto" && *cfg.Orchestrator {
 		if *cfg.Transcoder {
@@ -499,7 +511,18 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 		containerCreatorID = *cfg.EthAcctAddr
 	}
 
-	if *cfg.AIWorker {
+	var aiModelConfigs []core.AIModelConfig
+	if *cfg.AIModels != "" {
+		var err error
+		aiModelConfigs, err = core.ParseAIModelConfigs(*cfg.AIModels)
+		if err != nil {
+			glog.Errorf("Error parsing -aiModels: %v", err)
+			return
+		}
+	}
+	externalOnlyAIWorker := *cfg.AIWorker && aiModelConfigsExternalOnly(aiModelConfigs)
+
+	if *cfg.AIWorker && !externalOnlyAIWorker {
 		// Remove existing worker containers as soon as possible. This needs to be here so it's done before any resources
 		// are allocated by this process. That because we've seen issues where the AI worker containers hoard all the system
 		// resources and the Orchestrator cannot restart because it dies early (e.g. due to no (v)ram available).
@@ -1306,67 +1329,72 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 	capabilityConstraints := make(core.PerCapabilityConstraints)
 
 	if *cfg.AIWorker {
-		gpus := []string{}
-		if *cfg.Nvidia != "" {
-			var err error
-			gpus, err = common.ParseAccelDevices(*cfg.Nvidia, ffmpeg.Nvidia)
-			if err != nil {
-				glog.Errorf("Error parsing -nvidia for devices: %v", err)
-				return
-			}
+		if externalOnlyAIWorker {
+			glog.Infof("Starting external-only AI worker; Docker manager disabled because every AI model config has an external URL")
+			n.AIWorker = worker.NewExternalOnlyWorker()
 		} else {
-			glog.Warningf("!!! No GPU discovered, using CPU for AIWorker !!!")
-			// Create 1 fake GPU instances, intended for the local non-GPU setup
-			gpus = []string{"emulated-0"}
-		}
+			gpus := []string{}
+			if *cfg.Nvidia != "" {
+				var err error
+				gpus, err = common.ParseAccelDevices(*cfg.Nvidia, ffmpeg.Nvidia)
+				if err != nil {
+					glog.Errorf("Error parsing -nvidia for devices: %v", err)
+					return
+				}
+			} else {
+				glog.Warningf("!!! No GPU discovered, using CPU for AIWorker !!!")
+				// Create 1 fake GPU instances, intended for the local non-GPU setup
+				gpus = []string{"emulated-0"}
+			}
 
-		if *cfg.AIRunnerContainersPerGPU > 1 {
-			// Transform GPU entries to allow running multiple Runner Containers on the same GPU
-			var colocatedGpus []string
-			for i := range *cfg.AIRunnerContainersPerGPU {
-				for _, g := range gpus {
-					colocatedGpus = append(colocatedGpus, fmt.Sprintf("colocated-%d-%s", i, g))
+			if *cfg.AIRunnerContainersPerGPU > 1 {
+				// Transform GPU entries to allow running multiple Runner Containers on the same GPU
+				var colocatedGpus []string
+				for i := range *cfg.AIRunnerContainersPerGPU {
+					for _, g := range gpus {
+						colocatedGpus = append(colocatedGpus, fmt.Sprintf("colocated-%d-%s", i, g))
+					}
+				}
+				gpus = colocatedGpus
+			}
+
+			modelsDir := *cfg.AIModelsDir
+			if modelsDir == "" {
+				var err error
+				modelsDir, err = filepath.Abs(path.Join(*cfg.Datadir, "models"))
+				if err != nil {
+					glog.Error("Error creating absolute path for models dir: %v", modelsDir)
+					return
 				}
 			}
-			gpus = colocatedGpus
-		}
 
-		modelsDir := *cfg.AIModelsDir
-		if modelsDir == "" {
-			var err error
-			modelsDir, err = filepath.Abs(path.Join(*cfg.Datadir, "models"))
+			if err := os.MkdirAll(modelsDir, 0755); err != nil {
+				glog.Error("Error creating models dir %v", modelsDir)
+				return
+			}
+
+			// Retrieve image overrides from the config.
+			var imageOverrides worker.ImageOverrides
+			if *cfg.AIRunnerImageOverrides != "" {
+				if err := json.Unmarshal([]byte(*cfg.AIRunnerImageOverrides), &imageOverrides); err != nil {
+					glog.Errorf("Error unmarshaling image overrides: %v", err)
+					return
+				}
+			}
+
+			// Backwards compatibility for deprecated flags.
+			if *cfg.AIRunnerImage != "" {
+				glog.Warning("-aiRunnerImage flag is deprecated and will be removed in a future release. Please use -aiRunnerImageOverrides instead")
+				if imageOverrides.Default == "" {
+					imageOverrides.Default = *cfg.AIRunnerImage
+				}
+			}
+
+			n.AIWorker, err = worker.NewWorker(imageOverrides, *cfg.AIVerboseLogs, gpus, modelsDir, containerCreatorID)
 			if err != nil {
-				glog.Error("Error creating absolute path for models dir: %v", modelsDir)
+				glog.Errorf("Error starting AI worker: %v", err)
 				return
 			}
-		}
-
-		if err := os.MkdirAll(modelsDir, 0755); err != nil {
-			glog.Error("Error creating models dir %v", modelsDir)
-			return
-		}
-
-		// Retrieve image overrides from the config.
-		var imageOverrides worker.ImageOverrides
-		if *cfg.AIRunnerImageOverrides != "" {
-			if err := json.Unmarshal([]byte(*cfg.AIRunnerImageOverrides), &imageOverrides); err != nil {
-				glog.Errorf("Error unmarshaling image overrides: %v", err)
-				return
-			}
-		}
-
-		// Backwards compatibility for deprecated flags.
-		if *cfg.AIRunnerImage != "" {
-			glog.Warning("-aiRunnerImage flag is deprecated and will be removed in a future release. Please use -aiRunnerImageOverrides instead")
-			if imageOverrides.Default == "" {
-				imageOverrides.Default = *cfg.AIRunnerImage
-			}
-		}
-
-		n.AIWorker, err = worker.NewWorker(imageOverrides, *cfg.AIVerboseLogs, gpus, modelsDir, containerCreatorID)
-		if err != nil {
-			glog.Errorf("Error starting AI worker: %v", err)
-			return
 		}
 
 		defer func() {
@@ -1382,13 +1410,7 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 	}
 
 	if *cfg.AIModels != "" {
-		configs, err := core.ParseAIModelConfigs(*cfg.AIModels)
-		if err != nil {
-			glog.Errorf("Error parsing -aiModels: %v", err)
-			return
-		}
-
-		for _, config := range configs {
+		for _, config := range aiModelConfigs {
 			pipelineCap, err := core.PipelineToCapability(config.Pipeline)
 			if err != nil {
 				panic(fmt.Errorf("Pipeline is not valid capability: %v\n", config.Pipeline))
@@ -1406,10 +1428,12 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 					}
 				}
 
-				// Ensure the AI worker has the image needed to serve the job.
-				err := n.AIWorker.EnsureImageAvailable(ctx, config.Pipeline, config.ModelID)
-				if err != nil {
-					glog.Errorf("Error ensuring AI worker image available for %v: %v", config.Pipeline, err)
+				if config.URL == "" {
+					// Ensure the AI worker has the image needed to serve managed jobs.
+					err := n.AIWorker.EnsureImageAvailable(ctx, config.Pipeline, config.ModelID)
+					if err != nil {
+						glog.Errorf("Error ensuring AI worker image available for %v: %v", config.Pipeline, err)
+					}
 				}
 
 				for i := 0; i < modelsCount; i++ {
