@@ -312,7 +312,7 @@ func (rwm *RemoteAIWorkerManager) GetLiveAICapacity(pipeline, modelID string) wo
 	rwm.RWmutex.Lock()
 	defer rwm.RWmutex.Unlock()
 
-	var idle, inUse int
+	var remote, idle, inUse int
 	for _, remoteWorker := range rwm.remoteAIWorkers {
 		if _, ok := rwm.liveAIWorkers[remoteWorker.stream]; !ok {
 			continue
@@ -328,6 +328,7 @@ func (rwm *RemoteAIWorkerManager) GetLiveAICapacity(pipeline, modelID string) wo
 			continue
 		}
 
+		remote++
 		idle += model.Capacity
 		registeredCapacity := remoteWorker.registeredCapacity(cap, modelID)
 		if registeredCapacity < model.Capacity {
@@ -336,6 +337,7 @@ func (rwm *RemoteAIWorkerManager) GetLiveAICapacity(pipeline, modelID string) wo
 		inUse += registeredCapacity - model.Capacity
 	}
 
+	glog.Infof("GetLiveAICapacity: pipeline=%s modelID=%s remote=%d idle=%d inUse=%d total=%d", pipeline, modelID, remote, idle, inUse, idle+inUse)
 	return worker.Capacity{
 		ContainersInUse: inUse,
 		ContainersIdle:  idle,
