@@ -67,6 +67,10 @@ type RemoteAIWorkerManager struct {
 
 	// Map for keeping track of sessions and their respective aiworkers
 	requestSessions map[string]*remoteAIRequestSession
+
+	// Start the next new request scan here so equal-capacity remote workers do
+	// not starve behind the first registered worker.
+	nextWorkerIndex int
 }
 
 func NewRemoteAIWorker(m *RemoteAIWorkerManager, stream net.AIWorker_RegisterAIWorkerServer, caps *Capabilities, hardware []worker.HardwareInformation) *RemoteAIWorker {
@@ -225,19 +229,36 @@ func (rwm *RemoteAIWorkerManager) selectWorker(requestID string, pipeline string
 		if err != nil {
 			return -1
 		}
+
 		for idx := 0; idx < len(rwm.remoteAIWorkers); idx++ {
 			worker := rwm.remoteAIWorkers[idx]
 			if !rwm.isWorkerLiveLocked(worker) {
 				rwm.remoteAIWorkers = removeFromRemoteWorkers(worker, rwm.remoteAIWorkers)
+				if idx < rwm.nextWorkerIndex && rwm.nextWorkerIndex > 0 {
+					rwm.nextWorkerIndex--
+				}
 				idx--
 				continue
 			}
+		}
+		if len(rwm.remoteAIWorkers) == 0 {
+			rwm.nextWorkerIndex = 0
+			return -1
+		}
+		if rwm.nextWorkerIndex >= len(rwm.remoteAIWorkers) {
+			rwm.nextWorkerIndex = 0
+		}
+
+		for offset := 0; offset < len(rwm.remoteAIWorkers); offset++ {
+			idx := (rwm.nextWorkerIndex + offset) % len(rwm.remoteAIWorkers)
+			worker := rwm.remoteAIWorkers[idx]
 			rwCap, hasCap := worker.capabilities.constraints.perCapability[cap]
 			if hasCap {
 				_, hasModel := rwCap.Models[modelID]
 				if hasModel {
 					if rwCap.Models[modelID].Capacity > 0 {
 						rwm.remoteAIWorkers[idx].capabilities.constraints.perCapability[cap].Models[modelID].Capacity -= 1
+						rwm.nextWorkerIndex = (idx + 1) % len(rwm.remoteAIWorkers)
 						return idx
 					}
 				}
