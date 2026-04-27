@@ -18,6 +18,7 @@ import (
 	"github.com/livepeer/go-tools/drivers"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPipelineToCapability(t *testing.T) {
@@ -307,6 +308,40 @@ func TestSelectAIWorker(t *testing.T) {
 	assert.NotNil(w)
 	assert.Nil(err)
 	m.completeAIRequest(testRequestId, "image-to-image", "livepeer/model2")
+}
+
+func TestSelectAIWorker_RotatesAcrossEqualWorkers(t *testing.T) {
+	m := NewRemoteAIWorkerManager()
+	strm1 := &StubAIWorkerServer{manager: m, DelayResults: false}
+	strm2 := &StubAIWorkerServer{manager: m, DelayResults: false}
+	caps := createAIWorkerCapabilities()
+
+	go func() { m.Manage(strm1, caps.ToNetCapabilities(), nil) }()
+	time.Sleep(1 * time.Millisecond)
+	go func() { m.Manage(strm2, caps.ToNetCapabilities(), nil) }()
+	time.Sleep(1 * time.Millisecond)
+
+	require.Len(t, m.remoteAIWorkers, 2)
+	first := m.remoteAIWorkers[0]
+	second := m.remoteAIWorkers[1]
+
+	w, err := m.selectWorker("rr-1", "text-to-image", "livepeer/model1")
+	require.NoError(t, err)
+	require.Equal(t, first, w)
+	m.completeAIRequest("rr-1", "text-to-image", "livepeer/model1")
+
+	w, err = m.selectWorker("rr-2", "text-to-image", "livepeer/model1")
+	require.NoError(t, err)
+	require.Equal(t, second, w)
+	m.completeAIRequest("rr-2", "text-to-image", "livepeer/model1")
+
+	w, err = m.selectWorker("rr-3", "text-to-image", "livepeer/model1")
+	require.NoError(t, err)
+	require.Equal(t, first, w)
+	m.completeAIRequest("rr-3", "text-to-image", "livepeer/model1")
+
+	m.liveAIWorkers[strm1].eof <- struct{}{}
+	m.liveAIWorkers[strm2].eof <- struct{}{}
 }
 
 func TestManageAIWorkers(t *testing.T) {
