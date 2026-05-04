@@ -344,6 +344,74 @@ func TestSelectAIWorker_RotatesAcrossEqualWorkers(t *testing.T) {
 	m.liveAIWorkers[strm2].eof <- struct{}{}
 }
 
+func TestSelectAIWorker_UsesPriorityGroupsBeforeFallback(t *testing.T) {
+	m, err := NewRemoteAIWorkerManagerWithPrioritySpec("10.77.0.13=0,10.77.0.14=10")
+	require.NoError(t, err)
+
+	lowPriorityStream := &StubAIWorkerServer{manager: m, DelayResults: false}
+	preferredStreamA := &StubAIWorkerServer{manager: m, DelayResults: false}
+	preferredStreamB := &StubAIWorkerServer{manager: m, DelayResults: false}
+
+	oneSlotCaps := func() *Capabilities {
+		caps := createAIWorkerCapabilities()
+		caps.constraints.perCapability[Capability_TextToImage].Models["livepeer/model1"].Capacity = 1
+		return caps
+	}
+
+	go func() { m.Manage(lowPriorityStream, oneSlotCaps().ToNetCapabilities(), nil) }()
+	time.Sleep(1 * time.Millisecond)
+	go func() { m.Manage(preferredStreamA, oneSlotCaps().ToNetCapabilities(), nil) }()
+	time.Sleep(1 * time.Millisecond)
+	go func() { m.Manage(preferredStreamB, oneSlotCaps().ToNetCapabilities(), nil) }()
+	time.Sleep(1 * time.Millisecond)
+
+	require.Len(t, m.remoteAIWorkers, 3)
+	lowPriorityWorker := m.remoteAIWorkers[0]
+	preferredWorkerA := m.remoteAIWorkers[1]
+	preferredWorkerB := m.remoteAIWorkers[2]
+	lowPriorityWorker.addr = "10.77.0.14:10000"
+	preferredWorkerA.addr = "10.77.0.13:10001"
+	preferredWorkerB.addr = "10.77.0.13:10002"
+
+	w, err := m.selectWorker("prio-1", "text-to-image", "livepeer/model1")
+	require.NoError(t, err)
+	require.Equal(t, preferredWorkerA, w)
+
+	w, err = m.selectWorker("prio-2", "text-to-image", "livepeer/model1")
+	require.NoError(t, err)
+	require.Equal(t, preferredWorkerB, w)
+
+	w, err = m.selectWorker("prio-3", "text-to-image", "livepeer/model1")
+	require.NoError(t, err)
+	require.Equal(t, lowPriorityWorker, w)
+
+	m.completeAIRequest("prio-1", "text-to-image", "livepeer/model1")
+	w, err = m.selectWorker("prio-4", "text-to-image", "livepeer/model1")
+	require.NoError(t, err)
+	require.Equal(t, preferredWorkerA, w)
+
+	m.liveAIWorkers[lowPriorityStream].eof <- struct{}{}
+	m.liveAIWorkers[preferredStreamA].eof <- struct{}{}
+	m.liveAIWorkers[preferredStreamB].eof <- struct{}{}
+}
+
+func TestParseRemoteAIWorkerPrioritySpec(t *testing.T) {
+	rules, err := parseRemoteAIWorkerPrioritySpec("10.77.0.13=0,10.77.0.14/31=10,worker.example=20")
+	require.NoError(t, err)
+	require.Len(t, rules, 3)
+
+	require.True(t, rules[0].matches("10.77.0.13"))
+	require.False(t, rules[0].matches("10.77.0.14"))
+	require.True(t, rules[1].matches("10.77.0.14"))
+	require.True(t, rules[1].matches("10.77.0.15"))
+	require.True(t, rules[2].matches("worker.example"))
+
+	_, err = parseRemoteAIWorkerPrioritySpec("10.77.0.13=oops")
+	require.Error(t, err)
+	_, err = parseRemoteAIWorkerPrioritySpec("10.77.0.13/999=1")
+	require.Error(t, err)
+}
+
 func TestManageAIWorkers(t *testing.T) {
 	m := NewRemoteAIWorkerManager()
 	strm := &StubAIWorkerServer{}

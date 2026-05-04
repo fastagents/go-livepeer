@@ -9,9 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	stdnet "net"
+	"net/netip"
 	"os"
 	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +38,7 @@ var ErrNoWorkersAvailable = errors.New("no workers available")
 var aiWorkerResultsTimeout = 10 * time.Minute
 var aiWorkerRequestTimeout = 15 * time.Minute
 var aiWorkerTranscodeLoopTimeout = 70 * time.Second
+var defaultRemoteAIWorkerPriority = int(^uint(0) >> 1)
 
 type RemoteAIWorker struct {
 	manager              *RemoteAIWorkerManager
@@ -59,6 +63,7 @@ type RemoteAIWorkerManager struct {
 	remoteAIWorkers []*RemoteAIWorker
 	liveAIWorkers   map[net.AIWorker_RegisterAIWorkerServer]*RemoteAIWorker
 	RWmutex         sync.Mutex
+	priorityRules   []remoteAIWorkerPriorityRule
 
 	// For tracking tasks assigned to remote aiworkers
 	taskMutex *sync.RWMutex
@@ -68,8 +73,8 @@ type RemoteAIWorkerManager struct {
 	// Map for keeping track of sessions and their respective aiworkers
 	requestSessions map[string]*remoteAIRequestSession
 
-	// Start the next new request scan here so equal-capacity remote workers do
-	// not starve behind the first registered worker.
+	// Start the next new request scan here so equal-priority/equal-capacity
+	// remote workers do not starve behind the first registered worker.
 	nextWorkerIndex int
 }
 
@@ -97,6 +102,12 @@ type remoteAIRequestSession struct {
 	releaseOnDoneStarted bool
 }
 
+type remoteAIWorkerPriorityRule struct {
+	pattern  string
+	priority int
+	prefix   netip.Prefix
+}
+
 func snapshotRemoteAIWorkerCapacities(caps *Capabilities) map[remoteAIWorkerCapacityKey]int {
 	registeredCapacities := make(map[remoteAIWorkerCapacityKey]int)
 	if caps == nil {
@@ -117,16 +128,74 @@ func snapshotRemoteAIWorkerCapacities(caps *Capabilities) map[remoteAIWorkerCapa
 }
 
 func NewRemoteAIWorkerManager() *RemoteAIWorkerManager {
+	m, err := NewRemoteAIWorkerManagerWithPrioritySpec("")
+	if err != nil {
+		// Empty specs must never fail. Keep the panic local to catch accidental
+		// future changes that would make the default constructor unsafe.
+		panic(err)
+	}
+	return m
+}
+
+func NewRemoteAIWorkerManagerWithPrioritySpec(prioritySpec string) (*RemoteAIWorkerManager, error) {
+	priorityRules, err := parseRemoteAIWorkerPrioritySpec(prioritySpec)
+	if err != nil {
+		return nil, err
+	}
 	return &RemoteAIWorkerManager{
 		remoteAIWorkers: []*RemoteAIWorker{},
 		liveAIWorkers:   map[net.AIWorker_RegisterAIWorkerServer]*RemoteAIWorker{},
 		RWmutex:         sync.Mutex{},
+		priorityRules:   priorityRules,
 
 		taskMutex: &sync.RWMutex{},
 		taskChans: make(map[int64]AIWorkerChan),
 
 		requestSessions: make(map[string]*remoteAIRequestSession),
+	}, nil
+}
+
+func parseRemoteAIWorkerPrioritySpec(spec string) ([]remoteAIWorkerPriorityRule, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
 	}
+
+	parts := strings.Split(spec, ",")
+	rules := make([]remoteAIWorkerPriorityRule, 0, len(parts))
+	for idx, raw := range parts {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+
+		pattern, priorityText, hasPriority := strings.Cut(raw, "=")
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			return nil, fmt.Errorf("empty remote AI worker priority pattern in %q", raw)
+		}
+
+		priority := idx
+		if hasPriority {
+			var err error
+			priorityText = strings.TrimSpace(priorityText)
+			priority, err = strconv.Atoi(priorityText)
+			if err != nil {
+				return nil, fmt.Errorf("invalid remote AI worker priority %q in %q: %w", priorityText, raw, err)
+			}
+		}
+
+		rule := remoteAIWorkerPriorityRule{pattern: pattern, priority: priority}
+		if strings.Contains(pattern, "/") {
+			prefix, err := netip.ParsePrefix(pattern)
+			if err != nil {
+				return nil, fmt.Errorf("invalid remote AI worker priority CIDR %q: %w", pattern, err)
+			}
+			rule.prefix = prefix
+		}
+		rules = append(rules, rule)
+	}
+	return rules, nil
 }
 
 func (orch *orchestrator) ServeAIWorker(stream net.AIWorker_RegisterAIWorkerServer, capabilities *net.Capabilities, hardware []*net.HardwareInformation) {
@@ -168,6 +237,7 @@ func (rwm *RemoteAIWorkerManager) Manage(stream net.AIWorker_RegisterAIWorkerSer
 	rwm.RWmutex.Lock()
 	rwm.liveAIWorkers[aiworker.stream] = aiworker
 	rwm.remoteAIWorkers = append(rwm.remoteAIWorkers, aiworker)
+	glog.Infof("Registered remote AI worker addr=%s priority=%d", from, rwm.workerPriorityLocked(aiworker))
 	rwm.RWmutex.Unlock()
 
 	<-aiworker.eof
@@ -249,20 +319,33 @@ func (rwm *RemoteAIWorkerManager) selectWorker(requestID string, pipeline string
 			rwm.nextWorkerIndex = 0
 		}
 
+		bestPriority := defaultRemoteAIWorkerPriority
+		foundCompatibleWorker := false
 		for offset := 0; offset < len(rwm.remoteAIWorkers); offset++ {
 			idx := (rwm.nextWorkerIndex + offset) % len(rwm.remoteAIWorkers)
 			worker := rwm.remoteAIWorkers[idx]
-			rwCap, hasCap := worker.capabilities.constraints.perCapability[cap]
-			if hasCap {
-				_, hasModel := rwCap.Models[modelID]
-				if hasModel {
-					if rwCap.Models[modelID].Capacity > 0 {
-						rwm.remoteAIWorkers[idx].capabilities.constraints.perCapability[cap].Models[modelID].Capacity -= 1
-						rwm.nextWorkerIndex = (idx + 1) % len(rwm.remoteAIWorkers)
-						return idx
-					}
-				}
+			if !workerHasModelCapacity(worker, cap, modelID) {
+				continue
 			}
+			priority := rwm.workerPriorityLocked(worker)
+			if !foundCompatibleWorker || priority < bestPriority {
+				bestPriority = priority
+				foundCompatibleWorker = true
+			}
+		}
+		if !foundCompatibleWorker {
+			return -1
+		}
+
+		for offset := 0; offset < len(rwm.remoteAIWorkers); offset++ {
+			idx := (rwm.nextWorkerIndex + offset) % len(rwm.remoteAIWorkers)
+			worker := rwm.remoteAIWorkers[idx]
+			if !workerHasModelCapacity(worker, cap, modelID) || rwm.workerPriorityLocked(worker) != bestPriority {
+				continue
+			}
+			rwm.remoteAIWorkers[idx].capabilities.constraints.perCapability[cap].Models[modelID].Capacity -= 1
+			rwm.nextWorkerIndex = (idx + 1) % len(rwm.remoteAIWorkers)
+			return idx
 		}
 		return -1
 	}
@@ -296,6 +379,49 @@ func (rwm *RemoteAIWorkerManager) selectWorker(requestID string, pipeline string
 	}
 
 	return nil, ErrNoWorkersAvailable
+}
+
+func workerHasModelCapacity(worker *RemoteAIWorker, cap Capability, modelID string) bool {
+	if worker == nil || worker.capabilities == nil {
+		return false
+	}
+	rwCap, hasCap := worker.capabilities.constraints.perCapability[cap]
+	if !hasCap || rwCap == nil {
+		return false
+	}
+	model, hasModel := rwCap.Models[modelID]
+	return hasModel && model != nil && model.Capacity > 0
+}
+
+func (rwm *RemoteAIWorkerManager) workerPriorityLocked(worker *RemoteAIWorker) int {
+	if worker == nil || len(rwm.priorityRules) == 0 {
+		return defaultRemoteAIWorkerPriority
+	}
+	host := remoteAIWorkerAddrHost(worker.addr)
+	for _, rule := range rwm.priorityRules {
+		if rule.matches(host) {
+			return rule.priority
+		}
+	}
+	return defaultRemoteAIWorkerPriority
+}
+
+func (rule remoteAIWorkerPriorityRule) matches(host string) bool {
+	if host == "" {
+		return false
+	}
+	if rule.prefix.IsValid() {
+		addr, err := netip.ParseAddr(host)
+		return err == nil && rule.prefix.Contains(addr)
+	}
+	return host == rule.pattern
+}
+
+func remoteAIWorkerAddrHost(addr string) string {
+	if host, _, err := stdnet.SplitHostPort(addr); err == nil {
+		return strings.Trim(host, "[]")
+	}
+	return strings.Trim(addr, "[]")
 }
 
 func (rwm *RemoteAIWorkerManager) workerHasCapacity(pipeline, modelID string) bool {

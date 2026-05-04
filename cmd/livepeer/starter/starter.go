@@ -192,6 +192,7 @@ type LivepeerConfig struct {
 	LiveOutSegmentTimeout      *time.Duration
 	LiveAICapReportInterval    *time.Duration
 	LiveAICapRefreshModels     *string
+	LiveAIWorkerPriorities     *string
 	LiveAISaveNSegments        *int
 }
 
@@ -249,6 +250,7 @@ func DefaultLivepeerConfig() LivepeerConfig {
 	defaultGatewayHost := ""
 	defaultLiveAIHeartbeatInterval := 5 * time.Second
 	defaultLiveAICapReportInterval := 25 * time.Minute
+	defaultLiveAIWorkerPriorities := os.Getenv("LIVE_AI_REMOTE_WORKER_PRIORITIES")
 
 	// Onchain:
 	defaultEthAcctAddr := ""
@@ -374,6 +376,7 @@ func DefaultLivepeerConfig() LivepeerConfig {
 		GatewayHost:              &defaultGatewayHost,
 		LiveAIHeartbeatInterval:  &defaultLiveAIHeartbeatInterval,
 		LiveAICapReportInterval:  &defaultLiveAICapReportInterval,
+		LiveAIWorkerPriorities:   &defaultLiveAIWorkerPriorities,
 
 		// Onchain:
 		EthAcctAddr:             &defaultEthAcctAddr,
@@ -740,7 +743,11 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 			n.Transcoder = n.TranscoderManager
 		}
 		if !*cfg.AIWorker {
-			n.AIWorkerManager = core.NewRemoteAIWorkerManager()
+			aiWorkerManager, err := core.NewRemoteAIWorkerManagerWithPrioritySpec(*cfg.LiveAIWorkerPriorities)
+			if err != nil {
+				exit("Error parsing -liveAIWorkerPriorities: %v", err)
+			}
+			n.AIWorkerManager = aiWorkerManager
 		}
 	} else if *cfg.Transcoder {
 		n.NodeType = core.TranscoderNode
