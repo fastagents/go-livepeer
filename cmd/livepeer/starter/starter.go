@@ -667,13 +667,13 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 		}
 	}
 	if cfg.NodesFile != nil && strings.TrimSpace(*cfg.NodesFile) != "" {
-		nodes, spec, err := parseNodesFile(*cfg.NodesFile)
+		nodes, spec, sig, err := parseNodesFileWithSignature(*cfg.NodesFile)
 		if err != nil {
 			glog.Exit("No valid instance URLs parsed from -nodesFile: ", err)
 		}
 		n.SetNodes(nodes)
 		glog.Infof("Configured nodes from file=%s nodes=%v", *cfg.NodesFile, strings.Join(nodes, ","))
-		startNodesFileWatcher(n, *cfg.NodesFile, spec)
+		startNodesFileWatcher(n, *cfg.NodesFile, spec, sig)
 	}
 
 	var transcoderCaps []core.Capability
@@ -2144,6 +2144,24 @@ func parseNodes(addrs string) ([]string, error) {
 
 var nodesFileCheckInterval = 5 * time.Second
 
+type nodesFileSignature struct {
+	size    int64
+	mode    os.FileMode
+	modTime time.Time
+}
+
+func statNodesFile(nodesFile string) (nodesFileSignature, error) {
+	info, err := os.Stat(nodesFile)
+	if err != nil {
+		return nodesFileSignature{}, err
+	}
+	return nodesFileSignature{
+		size:    info.Size(),
+		mode:    info.Mode(),
+		modTime: info.ModTime(),
+	}, nil
+}
+
 func normalizeNodesFileSpec(spec string) string {
 	var entries []string
 	for _, line := range strings.Split(spec, "\n") {
@@ -2160,23 +2178,32 @@ func normalizeNodesFileSpec(spec string) string {
 }
 
 func parseNodesFile(nodesFile string) ([]string, string, error) {
+	nodes, spec, _, err := parseNodesFileWithSignature(nodesFile)
+	return nodes, spec, err
+}
+
+func parseNodesFileWithSignature(nodesFile string) ([]string, string, nodesFileSignature, error) {
 	nodesFile = strings.TrimSpace(nodesFile)
+	sig, err := statNodesFile(nodesFile)
+	if err != nil {
+		return nil, "", nodesFileSignature{}, fmt.Errorf("stat nodes file %q: %w", nodesFile, err)
+	}
 	contents, err := os.ReadFile(nodesFile)
 	if err != nil {
-		return nil, "", fmt.Errorf("read nodes file %q: %w", nodesFile, err)
+		return nil, "", sig, fmt.Errorf("read nodes file %q: %w", nodesFile, err)
 	}
 	spec := normalizeNodesFileSpec(string(contents))
 	if spec == "" {
-		return []string{}, spec, nil
+		return []string{}, spec, sig, nil
 	}
 	nodes, err := parseNodes(spec)
 	if err != nil {
-		return nil, spec, fmt.Errorf("parse nodes file %q: %w", nodesFile, err)
+		return nil, spec, sig, fmt.Errorf("parse nodes file %q: %w", nodesFile, err)
 	}
-	return nodes, spec, nil
+	return nodes, spec, sig, nil
 }
 
-func startNodesFileWatcher(n *core.LivepeerNode, nodesFile string, lastSpec string) {
+func startNodesFileWatcher(n *core.LivepeerNode, nodesFile string, lastSpec string, lastSig nodesFileSignature) {
 	nodesFile = strings.TrimSpace(nodesFile)
 	if nodesFile == "" {
 		return
@@ -2186,7 +2213,21 @@ func startNodesFileWatcher(n *core.LivepeerNode, nodesFile string, lastSpec stri
 		defer ticker.Stop()
 		lastErr := ""
 		for range ticker.C {
-			nodes, spec, err := parseNodesFile(nodesFile)
+			sig, err := statNodesFile(nodesFile)
+			if err != nil {
+				msg := fmt.Sprintf("stat nodes file %q: %v", nodesFile, err)
+				if msg != lastErr {
+					glog.Errorf("Could not check nodes file: %v", err)
+					lastErr = msg
+				}
+				continue
+			}
+			if sig == lastSig {
+				lastErr = ""
+				continue
+			}
+
+			nodes, spec, readSig, err := parseNodesFileWithSignature(nodesFile)
 			if err != nil {
 				msg := err.Error()
 				if msg != lastErr {
@@ -2196,6 +2237,7 @@ func startNodesFileWatcher(n *core.LivepeerNode, nodesFile string, lastSpec stri
 				continue
 			}
 			lastErr = ""
+			lastSig = readSig
 			if spec == lastSpec {
 				continue
 			}

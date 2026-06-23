@@ -97,7 +97,9 @@ func TestNodesFileWatcherReloadsAndKeepsLastGood(t *testing.T) {
 
 	n := &core.LivepeerNode{}
 	n.SetNodes(nodes)
-	startNodesFileWatcher(n, nodesFile, spec)
+	sig, err := statNodesFile(nodesFile)
+	require.NoError(t, err)
+	startNodesFileWatcher(n, nodesFile, spec, sig)
 
 	require.NoError(t, os.WriteFile(nodesFile, []byte("dd-us5.fastagents.biz:8936\n"), 0600))
 	require.Eventually(t, func() bool {

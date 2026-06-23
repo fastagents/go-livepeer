@@ -67,6 +67,7 @@ type RemoteAIWorkerManager struct {
 	priorityRules         []remoteAIWorkerPriorityRule
 	prioritySpec          string
 	priorityFile          string
+	priorityFileSig       remoteAIWorkerPriorityFileSignature
 	priorityFileLastCheck time.Time
 	priorityFileLastErr   string
 
@@ -113,6 +114,36 @@ type remoteAIWorkerPriorityRule struct {
 	prefix   netip.Prefix
 }
 
+type remoteAIWorkerPriorityFileSignature struct {
+	size    int64
+	mode    os.FileMode
+	modTime time.Time
+}
+
+func statRemoteAIWorkerPriorityFile(priorityFile string) (remoteAIWorkerPriorityFileSignature, error) {
+	info, err := os.Stat(priorityFile)
+	if err != nil {
+		return remoteAIWorkerPriorityFileSignature{}, err
+	}
+	return remoteAIWorkerPriorityFileSignature{
+		size:    info.Size(),
+		mode:    info.Mode(),
+		modTime: info.ModTime(),
+	}, nil
+}
+
+func readRemoteAIWorkerPriorityFile(priorityFile string) (string, remoteAIWorkerPriorityFileSignature, error) {
+	sig, err := statRemoteAIWorkerPriorityFile(priorityFile)
+	if err != nil {
+		return "", remoteAIWorkerPriorityFileSignature{}, err
+	}
+	contents, err := os.ReadFile(priorityFile)
+	if err != nil {
+		return "", sig, err
+	}
+	return string(contents), sig, nil
+}
+
 func snapshotRemoteAIWorkerCapacities(caps *Capabilities) map[remoteAIWorkerCapacityKey]int {
 	registeredCapacities := make(map[remoteAIWorkerCapacityKey]int)
 	if caps == nil {
@@ -149,12 +180,14 @@ func NewRemoteAIWorkerManagerWithPrioritySpec(prioritySpec string) (*RemoteAIWor
 func NewRemoteAIWorkerManagerWithPriorityConfig(prioritySpec, priorityFile string) (*RemoteAIWorkerManager, error) {
 	priorityFile = strings.TrimSpace(priorityFile)
 	effectiveSpec := prioritySpec
+	var priorityFileSig remoteAIWorkerPriorityFileSignature
 	if priorityFile != "" {
-		contents, err := os.ReadFile(priorityFile)
+		contents, sig, err := readRemoteAIWorkerPriorityFile(priorityFile)
 		if err != nil {
 			return nil, fmt.Errorf("read remote AI worker priority file %q: %w", priorityFile, err)
 		}
-		effectiveSpec = string(contents)
+		effectiveSpec = contents
+		priorityFileSig = sig
 	}
 	normalizedSpec := normalizeRemoteAIWorkerPrioritySpec(effectiveSpec)
 	priorityRules, err := parseRemoteAIWorkerPrioritySpec(normalizedSpec)
@@ -168,6 +201,7 @@ func NewRemoteAIWorkerManagerWithPriorityConfig(prioritySpec, priorityFile strin
 		priorityRules:   priorityRules,
 		prioritySpec:    normalizedSpec,
 		priorityFile:    priorityFile,
+		priorityFileSig: priorityFileSig,
 
 		taskMutex: &sync.RWMutex{},
 		taskChans: make(map[int64]AIWorkerChan),
@@ -457,14 +491,25 @@ func (rwm *RemoteAIWorkerManager) refreshPriorityRulesLocked() {
 	}
 	rwm.priorityFileLastCheck = now
 
-	contents, err := os.ReadFile(rwm.priorityFile)
+	sig, err := statRemoteAIWorkerPriorityFile(rwm.priorityFile)
+	if err != nil {
+		rwm.logPriorityFileErrorLocked(fmt.Errorf("stat remote AI worker priority file %q: %w", rwm.priorityFile, err))
+		return
+	}
+	if sig == rwm.priorityFileSig {
+		rwm.priorityFileLastErr = ""
+		return
+	}
+
+	contents, readSig, err := readRemoteAIWorkerPriorityFile(rwm.priorityFile)
 	if err != nil {
 		rwm.logPriorityFileErrorLocked(fmt.Errorf("read remote AI worker priority file %q: %w", rwm.priorityFile, err))
 		return
 	}
 
-	prioritySpec := normalizeRemoteAIWorkerPrioritySpec(string(contents))
+	prioritySpec := normalizeRemoteAIWorkerPrioritySpec(contents)
 	if prioritySpec == rwm.prioritySpec {
+		rwm.priorityFileSig = readSig
 		rwm.priorityFileLastErr = ""
 		return
 	}
@@ -477,6 +522,7 @@ func (rwm *RemoteAIWorkerManager) refreshPriorityRulesLocked() {
 
 	rwm.priorityRules = priorityRules
 	rwm.prioritySpec = prioritySpec
+	rwm.priorityFileSig = readSig
 	rwm.priorityFileLastErr = ""
 	glog.Infof("Reloaded remote AI worker priorities file=%s rules=%d", rwm.priorityFile, len(priorityRules))
 }
