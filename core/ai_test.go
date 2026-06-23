@@ -395,8 +395,61 @@ func TestSelectAIWorker_UsesPriorityGroupsBeforeFallback(t *testing.T) {
 	m.liveAIWorkers[preferredStreamB].eof <- struct{}{}
 }
 
+func TestSelectAIWorker_ReloadsPriorityFile(t *testing.T) {
+	oldCheckInterval := remoteAIWorkerPriorityFileCheckInterval
+	remoteAIWorkerPriorityFileCheckInterval = 0
+	defer func() { remoteAIWorkerPriorityFileCheckInterval = oldCheckInterval }()
+
+	priorityFile := filepath.Join(t.TempDir(), "priorities")
+	require.NoError(t, os.WriteFile(priorityFile, []byte("10.77.0.13=0\n10.77.0.14=10\n"), 0600))
+
+	m, err := NewRemoteAIWorkerManagerWithPriorityConfig("10.77.0.14=0", priorityFile)
+	require.NoError(t, err)
+
+	streamA := &StubAIWorkerServer{manager: m, DelayResults: false}
+	streamB := &StubAIWorkerServer{manager: m, DelayResults: false}
+
+	oneSlotCaps := func() *Capabilities {
+		caps := createAIWorkerCapabilities()
+		caps.constraints.perCapability[Capability_TextToImage].Models["livepeer/model1"].Capacity = 1
+		return caps
+	}
+
+	go func() { m.Manage(streamA, oneSlotCaps().ToNetCapabilities(), nil) }()
+	time.Sleep(1 * time.Millisecond)
+	go func() { m.Manage(streamB, oneSlotCaps().ToNetCapabilities(), nil) }()
+	time.Sleep(1 * time.Millisecond)
+
+	require.Len(t, m.remoteAIWorkers, 2)
+	workerA := m.remoteAIWorkers[0]
+	workerB := m.remoteAIWorkers[1]
+	workerA.addr = "10.77.0.13:10001"
+	workerB.addr = "10.77.0.14:10002"
+
+	w, err := m.selectWorker("file-prio-1", "text-to-image", "livepeer/model1")
+	require.NoError(t, err)
+	require.Equal(t, workerA, w)
+	m.completeAIRequest("file-prio-1", "text-to-image", "livepeer/model1")
+
+	require.NoError(t, os.WriteFile(priorityFile, []byte("# prefer B without restarting orch\n10.77.0.13=10\n10.77.0.14=0\n"), 0600))
+
+	w, err = m.selectWorker("file-prio-2", "text-to-image", "livepeer/model1")
+	require.NoError(t, err)
+	require.Equal(t, workerB, w)
+	m.completeAIRequest("file-prio-2", "text-to-image", "livepeer/model1")
+
+	require.NoError(t, os.WriteFile(priorityFile, []byte("10.77.0.13=oops\n"), 0600))
+
+	w, err = m.selectWorker("file-prio-3", "text-to-image", "livepeer/model1")
+	require.NoError(t, err)
+	require.Equal(t, workerB, w)
+
+	m.liveAIWorkers[streamA].eof <- struct{}{}
+	m.liveAIWorkers[streamB].eof <- struct{}{}
+}
+
 func TestParseRemoteAIWorkerPrioritySpec(t *testing.T) {
-	rules, err := parseRemoteAIWorkerPrioritySpec("10.77.0.13=0,10.77.0.14/31=10,worker.example=20")
+	rules, err := parseRemoteAIWorkerPrioritySpec("10.77.0.13=0\n# local group\n10.77.0.14/31=10,worker.example=20")
 	require.NoError(t, err)
 	require.Len(t, rules, 3)
 

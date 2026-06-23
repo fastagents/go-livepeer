@@ -79,6 +79,7 @@ func NewLivepeerConfig(fs *flag.FlagSet) LivepeerConfig {
 	cfg.LiveAICapRefreshModels = fs.String("liveAICapRefreshModels", "", "[Deprecated] Capacity is now available for all models, use -liveAICapReportInterval to set the interval for reporting capacity metrics")
 	cfg.LiveAICapReportInterval = fs.Duration("liveAICapReportInterval", *cfg.LiveAICapReportInterval, "Interval to report Live AI container capacity metrics, e.g. 10s, 1m, 1h. defaults to 25 minutes")
 	cfg.LiveAIWorkerPriorities = fs.String("liveAIWorkerPriorities", *cfg.LiveAIWorkerPriorities, `Comma-separated remote AI worker priority rules for split fronts. Lower priority wins; unmatched workers are fallback. Use host or CIDR patterns, e.g. "10.77.0.13=0,10.77.0.14/31=10". Defaults to LIVE_AI_REMOTE_WORKER_PRIORITIES env var.`)
+	cfg.LiveAIWorkerPrioritiesFile = fs.String("liveAIWorkerPrioritiesFile", *cfg.LiveAIWorkerPrioritiesFile, "Path to a live-reloaded remote AI worker priority rules file. Uses the same syntax as -liveAIWorkerPriorities, supports comments, and overrides the inline priority string while set. Defaults to LIVE_AI_REMOTE_WORKER_PRIORITIES_FILE env var.")
 
 	// Onchain:
 	cfg.EthAcctAddr = fs.String("ethAcctAddr", *cfg.EthAcctAddr, "Existing Eth account address. For use when multiple ETH accounts exist in the keystore directory")

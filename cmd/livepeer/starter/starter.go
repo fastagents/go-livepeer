@@ -193,6 +193,7 @@ type LivepeerConfig struct {
 	LiveAICapReportInterval    *time.Duration
 	LiveAICapRefreshModels     *string
 	LiveAIWorkerPriorities     *string
+	LiveAIWorkerPrioritiesFile *string
 	LiveAISaveNSegments        *int
 }
 
@@ -251,6 +252,7 @@ func DefaultLivepeerConfig() LivepeerConfig {
 	defaultLiveAIHeartbeatInterval := 5 * time.Second
 	defaultLiveAICapReportInterval := 25 * time.Minute
 	defaultLiveAIWorkerPriorities := os.Getenv("LIVE_AI_REMOTE_WORKER_PRIORITIES")
+	defaultLiveAIWorkerPrioritiesFile := os.Getenv("LIVE_AI_REMOTE_WORKER_PRIORITIES_FILE")
 
 	// Onchain:
 	defaultEthAcctAddr := ""
@@ -360,23 +362,24 @@ func DefaultLivepeerConfig() LivepeerConfig {
 		TestTranscoder:       &defaultTestTranscoder,
 
 		// AI:
-		AIServiceRegistry:        &defaultAIServiceRegistry,
-		AIWorker:                 &defaultAIWorker,
-		AIModels:                 &defaultAIModels,
-		AIModelsDir:              &defaultAIModelsDir,
-		AIRunnerImage:            &defaultAIRunnerImage,
-		AIVerboseLogs:            &defaultAIVerboseLogs,
-		AIProcessingRetryTimeout: &defaultAIProcessingRetryTimeout,
-		AIRunnerContainersPerGPU: &defaultAIRunnerContainersPerGPU,
-		AIMinRunnerVersion:       &defaultAIMinRunnerVersion,
-		AIRunnerImageOverrides:   &defaultAIRunnerImageOverrides,
-		LiveAIAuthWebhookURL:     &defaultLiveAIAuthWebhookURL,
-		LivePaymentInterval:      &defaultLivePaymentInterval,
-		LiveOutSegmentTimeout:    &defaultLiveOutSegmentTimeout,
-		GatewayHost:              &defaultGatewayHost,
-		LiveAIHeartbeatInterval:  &defaultLiveAIHeartbeatInterval,
-		LiveAICapReportInterval:  &defaultLiveAICapReportInterval,
-		LiveAIWorkerPriorities:   &defaultLiveAIWorkerPriorities,
+		AIServiceRegistry:          &defaultAIServiceRegistry,
+		AIWorker:                   &defaultAIWorker,
+		AIModels:                   &defaultAIModels,
+		AIModelsDir:                &defaultAIModelsDir,
+		AIRunnerImage:              &defaultAIRunnerImage,
+		AIVerboseLogs:              &defaultAIVerboseLogs,
+		AIProcessingRetryTimeout:   &defaultAIProcessingRetryTimeout,
+		AIRunnerContainersPerGPU:   &defaultAIRunnerContainersPerGPU,
+		AIMinRunnerVersion:         &defaultAIMinRunnerVersion,
+		AIRunnerImageOverrides:     &defaultAIRunnerImageOverrides,
+		LiveAIAuthWebhookURL:       &defaultLiveAIAuthWebhookURL,
+		LivePaymentInterval:        &defaultLivePaymentInterval,
+		LiveOutSegmentTimeout:      &defaultLiveOutSegmentTimeout,
+		GatewayHost:                &defaultGatewayHost,
+		LiveAIHeartbeatInterval:    &defaultLiveAIHeartbeatInterval,
+		LiveAICapReportInterval:    &defaultLiveAICapReportInterval,
+		LiveAIWorkerPriorities:     &defaultLiveAIWorkerPriorities,
+		LiveAIWorkerPrioritiesFile: &defaultLiveAIWorkerPrioritiesFile,
 
 		// Onchain:
 		EthAcctAddr:             &defaultEthAcctAddr,
@@ -743,9 +746,9 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 			n.Transcoder = n.TranscoderManager
 		}
 		if !*cfg.AIWorker {
-			aiWorkerManager, err := core.NewRemoteAIWorkerManagerWithPrioritySpec(*cfg.LiveAIWorkerPriorities)
+			aiWorkerManager, err := core.NewRemoteAIWorkerManagerWithPriorityConfig(*cfg.LiveAIWorkerPriorities, *cfg.LiveAIWorkerPrioritiesFile)
 			if err != nil {
-				exit("Error parsing -liveAIWorkerPriorities: %v", err)
+				exit("Error parsing remote AI worker priorities: %v", err)
 			}
 			n.AIWorkerManager = aiWorkerManager
 		}
