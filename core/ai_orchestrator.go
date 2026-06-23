@@ -115,21 +115,15 @@ type remoteAIWorkerPriorityRule struct {
 }
 
 type remoteAIWorkerPriorityFileSignature struct {
-	size    int64
-	mode    os.FileMode
-	modTime time.Time
+	ReloadFileSignature
 }
 
 func statRemoteAIWorkerPriorityFile(priorityFile string) (remoteAIWorkerPriorityFileSignature, error) {
-	info, err := os.Stat(priorityFile)
+	sig, err := StatReloadFile(priorityFile)
 	if err != nil {
 		return remoteAIWorkerPriorityFileSignature{}, err
 	}
-	return remoteAIWorkerPriorityFileSignature{
-		size:    info.Size(),
-		mode:    info.Mode(),
-		modTime: info.ModTime(),
-	}, nil
+	return remoteAIWorkerPriorityFileSignature{ReloadFileSignature: sig}, nil
 }
 
 func readRemoteAIWorkerPriorityFile(priorityFile string) (string, remoteAIWorkerPriorityFileSignature, error) {

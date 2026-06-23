@@ -2145,21 +2145,15 @@ func parseNodes(addrs string) ([]string, error) {
 var nodesFileCheckInterval = 5 * time.Second
 
 type nodesFileSignature struct {
-	size    int64
-	mode    os.FileMode
-	modTime time.Time
+	core.ReloadFileSignature
 }
 
 func statNodesFile(nodesFile string) (nodesFileSignature, error) {
-	info, err := os.Stat(nodesFile)
+	sig, err := core.StatReloadFile(nodesFile)
 	if err != nil {
 		return nodesFileSignature{}, err
 	}
-	return nodesFileSignature{
-		size:    info.Size(),
-		mode:    info.Mode(),
-		modTime: info.ModTime(),
-	}, nil
+	return nodesFileSignature{ReloadFileSignature: sig}, nil
 }
 
 func normalizeNodesFileSpec(spec string) string {
