@@ -2234,6 +2234,7 @@ func startNodesFileWatcher(n *core.LivepeerNode, nodesFile string, lastSpec stri
 					glog.Errorf("Could not reload nodes file: %v", err)
 					lastErr = msg
 				}
+				lastSig = sig
 				continue
 			}
 			lastErr = ""

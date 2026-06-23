@@ -503,6 +503,7 @@ func (rwm *RemoteAIWorkerManager) refreshPriorityRulesLocked() {
 
 	contents, readSig, err := readRemoteAIWorkerPriorityFile(rwm.priorityFile)
 	if err != nil {
+		rwm.priorityFileSig = sig
 		rwm.logPriorityFileErrorLocked(fmt.Errorf("read remote AI worker priority file %q: %w", rwm.priorityFile, err))
 		return
 	}
@@ -516,6 +517,7 @@ func (rwm *RemoteAIWorkerManager) refreshPriorityRulesLocked() {
 
 	priorityRules, err := parseRemoteAIWorkerPrioritySpec(prioritySpec)
 	if err != nil {
+		rwm.priorityFileSig = readSig
 		rwm.logPriorityFileErrorLocked(fmt.Errorf("parse remote AI worker priority file %q: %w", rwm.priorityFile, err))
 		return
 	}
