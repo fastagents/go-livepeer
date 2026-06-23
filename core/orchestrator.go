@@ -499,7 +499,7 @@ func (orch *orchestrator) Nodes() []string {
 	if orch == nil || orch.node == nil {
 		return nil
 	}
-	return orch.node.Nodes
+	return orch.node.GetNodes()
 }
 
 func (orch *orchestrator) AuthToken(sessionID string, expiration int64) *net.AuthToken {

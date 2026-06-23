@@ -86,6 +86,7 @@ type LivepeerConfig struct {
 	HttpAddr                   *string
 	ServiceAddr                *string
 	Nodes                      *string
+	NodesFile                  *string
 	OrchAddr                   *string
 	VerifierURL                *string
 	EthController              *string
@@ -253,6 +254,7 @@ func DefaultLivepeerConfig() LivepeerConfig {
 	defaultLiveAICapReportInterval := 25 * time.Minute
 	defaultLiveAIWorkerPriorities := os.Getenv("LIVE_AI_REMOTE_WORKER_PRIORITIES")
 	defaultLiveAIWorkerPrioritiesFile := os.Getenv("LIVE_AI_REMOTE_WORKER_PRIORITIES_FILE")
+	defaultNodesFile := os.Getenv("LIVEPEER_NODES_FILE")
 
 	// Onchain:
 	defaultEthAcctAddr := ""
@@ -333,6 +335,7 @@ func DefaultLivepeerConfig() LivepeerConfig {
 		HttpAddr:     &defaultHttpAddr,
 		ServiceAddr:  &defaultServiceAddr,
 		Nodes:        &defaultNodes,
+		NodesFile:    &defaultNodesFile,
 		OrchAddr:     &defaultOrchAddr,
 		VerifierURL:  &defaultVerifierURL,
 		VerifierPath: &defaultVerifierPath,
@@ -655,12 +658,22 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 
 	// Parse -instances flag and store parsed canonicalized URLs in the node
 	if cfg.Nodes != nil && *cfg.Nodes != "" {
-		n.Nodes, err = parseNodes(*cfg.Nodes)
-		if err != nil || len(n.Nodes) == 0 {
+		nodes, err := parseNodes(*cfg.Nodes)
+		if err != nil || len(nodes) == 0 {
 			glog.Exit("No valid instance URLs parsed from -nodes: ", err)
 		} else {
-			glog.Infof("Configured nodes: %v", strings.Join(n.Nodes, ","))
+			n.SetNodes(nodes)
+			glog.Infof("Configured nodes: %v", strings.Join(nodes, ","))
 		}
+	}
+	if cfg.NodesFile != nil && strings.TrimSpace(*cfg.NodesFile) != "" {
+		nodes, spec, err := parseNodesFile(*cfg.NodesFile)
+		if err != nil {
+			glog.Exit("No valid instance URLs parsed from -nodesFile: ", err)
+		}
+		n.SetNodes(nodes)
+		glog.Infof("Configured nodes from file=%s nodes=%v", *cfg.NodesFile, strings.Join(nodes, ","))
+		startNodesFileWatcher(n, *cfg.NodesFile, spec)
 	}
 
 	var transcoderCaps []core.Capability
@@ -1787,7 +1800,7 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 			glog.Exit("Error getting service URI: ", err)
 		}
 
-		if suri.String() == "" && len(n.Nodes) == 0 {
+		if suri.String() == "" && len(n.GetNodes()) == 0 {
 			glog.Exit("Empty service URI and no additional nodes specified; set -serviceAddr or -nodes")
 		}
 
@@ -2127,6 +2140,70 @@ func parseNodes(addrs string) ([]string, error) {
 		res = append(res, parsed.String())
 	}
 	return res, nil
+}
+
+var nodesFileCheckInterval = 5 * time.Second
+
+func normalizeNodesFileSpec(spec string) string {
+	var entries []string
+	for _, line := range strings.Split(spec, "\n") {
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			line = line[:idx]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		entries = append(entries, line)
+	}
+	return strings.Join(entries, ",")
+}
+
+func parseNodesFile(nodesFile string) ([]string, string, error) {
+	nodesFile = strings.TrimSpace(nodesFile)
+	contents, err := os.ReadFile(nodesFile)
+	if err != nil {
+		return nil, "", fmt.Errorf("read nodes file %q: %w", nodesFile, err)
+	}
+	spec := normalizeNodesFileSpec(string(contents))
+	if spec == "" {
+		return []string{}, spec, nil
+	}
+	nodes, err := parseNodes(spec)
+	if err != nil {
+		return nil, spec, fmt.Errorf("parse nodes file %q: %w", nodesFile, err)
+	}
+	return nodes, spec, nil
+}
+
+func startNodesFileWatcher(n *core.LivepeerNode, nodesFile string, lastSpec string) {
+	nodesFile = strings.TrimSpace(nodesFile)
+	if nodesFile == "" {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(nodesFileCheckInterval)
+		defer ticker.Stop()
+		lastErr := ""
+		for range ticker.C {
+			nodes, spec, err := parseNodesFile(nodesFile)
+			if err != nil {
+				msg := err.Error()
+				if msg != lastErr {
+					glog.Errorf("Could not reload nodes file: %v", err)
+					lastErr = msg
+				}
+				continue
+			}
+			lastErr = ""
+			if spec == lastSpec {
+				continue
+			}
+			n.SetNodes(nodes)
+			lastSpec = spec
+			glog.Infof("Reloaded nodes file=%s nodes=%v", nodesFile, strings.Join(nodes, ","))
+		}
+	}()
 }
 
 func parseOrchBlacklist(b *string) []string {

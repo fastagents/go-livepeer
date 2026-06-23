@@ -14,6 +14,7 @@ func NewLivepeerConfig(fs *flag.FlagSet) LivepeerConfig {
 	cfg.HttpAddr = fs.String("httpAddr", *cfg.HttpAddr, "Address to bind for HTTP commands")
 	cfg.ServiceAddr = fs.String("serviceAddr", *cfg.ServiceAddr, "Orchestrator only. Overrides the on-chain serviceURI that gateways can use to contact this node; may be an IP or hostname.")
 	cfg.Nodes = fs.String("nodes", *cfg.Nodes, "Comma-separated list of instance URLs for this orchestrator")
+	cfg.NodesFile = fs.String("nodesFile", *cfg.NodesFile, "Path to a live-reloaded list of instance URLs for this orchestrator. Uses the same URL rules as -nodes, supports comments and newlines, and overrides -nodes while set. Defaults to LIVEPEER_NODES_FILE env var.")
 	cfg.VerifierURL = fs.String("verifierUrl", *cfg.VerifierURL, "URL of the verifier to use")
 	cfg.VerifierPath = fs.String("verifierPath", *cfg.VerifierPath, "Path to verifier shared volume")
 	cfg.LocalVerify = fs.Bool("localVerify", *cfg.LocalVerify, "Set to true to enable local verification i.e. pixel count and signature verification.")

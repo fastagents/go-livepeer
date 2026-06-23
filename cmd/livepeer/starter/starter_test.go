@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/livepeer/go-livepeer/common"
@@ -58,6 +59,59 @@ func TestSetupOrchestrator(t *testing.T) {
 	stubEthClient.Err = errors.New("GetTranscoder error")
 	err = setupOrchestrator(n, orch)
 	assert.EqualError(err, "GetTranscoder error")
+}
+
+func TestParseNodesFile(t *testing.T) {
+	nodesFile := filepath.Join(t.TempDir(), "nodes")
+	require.NoError(t, os.WriteFile(nodesFile, []byte(`
+# first child
+dd-us4.fastagents.biz:8935
+dd-us5.fastagents.biz:8936, https://dd-us7.fastagents.biz:8935 # inline comment
+`), 0600))
+
+	nodes, spec, err := parseNodesFile(nodesFile)
+	require.NoError(t, err)
+	require.Equal(t, "dd-us4.fastagents.biz:8935,dd-us5.fastagents.biz:8936, https://dd-us7.fastagents.biz:8935", spec)
+	require.Equal(t, []string{
+		"https://dd-us4.fastagents.biz:8935",
+		"https://dd-us5.fastagents.biz:8936",
+		"https://dd-us7.fastagents.biz:8935",
+	}, nodes)
+
+	require.NoError(t, os.WriteFile(nodesFile, []byte("# remove all carried nodes\n\n"), 0600))
+	nodes, spec, err = parseNodesFile(nodesFile)
+	require.NoError(t, err)
+	require.Equal(t, "", spec)
+	require.Empty(t, nodes)
+}
+
+func TestNodesFileWatcherReloadsAndKeepsLastGood(t *testing.T) {
+	oldCheckInterval := nodesFileCheckInterval
+	nodesFileCheckInterval = 10 * time.Millisecond
+	defer func() { nodesFileCheckInterval = oldCheckInterval }()
+
+	nodesFile := filepath.Join(t.TempDir(), "nodes")
+	require.NoError(t, os.WriteFile(nodesFile, []byte("dd-us4.fastagents.biz:8935\n"), 0600))
+	nodes, spec, err := parseNodesFile(nodesFile)
+	require.NoError(t, err)
+
+	n := &core.LivepeerNode{}
+	n.SetNodes(nodes)
+	startNodesFileWatcher(n, nodesFile, spec)
+
+	require.NoError(t, os.WriteFile(nodesFile, []byte("dd-us5.fastagents.biz:8936\n"), 0600))
+	require.Eventually(t, func() bool {
+		return assert.Equal(t, []string{"https://dd-us5.fastagents.biz:8936"}, n.GetNodes())
+	}, time.Second, 10*time.Millisecond)
+
+	require.NoError(t, os.WriteFile(nodesFile, []byte("abc:def\n"), 0600))
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, []string{"https://dd-us5.fastagents.biz:8936"}, n.GetNodes())
+
+	require.NoError(t, os.WriteFile(nodesFile, []byte("# empty file removes carried children\n"), 0600))
+	require.Eventually(t, func() bool {
+		return len(n.GetNodes()) == 0
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestIsLocalURL(t *testing.T) {

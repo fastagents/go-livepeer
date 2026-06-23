@@ -240,6 +240,18 @@ func (n *LivepeerNode) SetServiceURI(newUrl *url.URL) {
 	n.serviceURI = *newUrl
 }
 
+func (n *LivepeerNode) GetNodes() []string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return append([]string(nil), n.Nodes...)
+}
+
+func (n *LivepeerNode) SetNodes(nodes []string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.Nodes = append([]string(nil), nodes...)
+}
+
 // SetBasePrice sets the base price for an orchestrator on the node
 func (n *LivepeerNode) SetBasePrice(b_eth_addr string, price *AutoConvertedPrice) {
 	addr := strings.ToLower(b_eth_addr)
