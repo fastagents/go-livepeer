@@ -70,6 +70,8 @@ type RemoteAIWorkerManager struct {
 	priorityFileSig       remoteAIWorkerPriorityFileSignature
 	priorityFileLastCheck time.Time
 	priorityFileLastErr   string
+	priorityFileChanges   <-chan struct{}
+	priorityFileErrors    <-chan error
 
 	// For tracking tasks assigned to remote aiworkers
 	taskMutex *sync.RWMutex
@@ -175,6 +177,8 @@ func NewRemoteAIWorkerManagerWithPriorityConfig(prioritySpec, priorityFile strin
 	priorityFile = strings.TrimSpace(priorityFile)
 	effectiveSpec := prioritySpec
 	var priorityFileSig remoteAIWorkerPriorityFileSignature
+	var priorityFileChanges <-chan struct{}
+	var priorityFileErrors <-chan error
 	if priorityFile != "" {
 		contents, sig, err := readRemoteAIWorkerPriorityFile(priorityFile)
 		if err != nil {
@@ -182,6 +186,13 @@ func NewRemoteAIWorkerManagerWithPriorityConfig(prioritySpec, priorityFile strin
 		}
 		effectiveSpec = contents
 		priorityFileSig = sig
+		watcher, err := WatchReloadFile(priorityFile)
+		if err != nil {
+			glog.Warningf("Could not watch remote AI worker priority file %q; falling back to stat checks: %v", priorityFile, err)
+		} else {
+			priorityFileChanges = watcher.Changes
+			priorityFileErrors = watcher.Errors
+		}
 	}
 	normalizedSpec := normalizeRemoteAIWorkerPrioritySpec(effectiveSpec)
 	priorityRules, err := parseRemoteAIWorkerPrioritySpec(normalizedSpec)
@@ -189,13 +200,15 @@ func NewRemoteAIWorkerManagerWithPriorityConfig(prioritySpec, priorityFile strin
 		return nil, err
 	}
 	return &RemoteAIWorkerManager{
-		remoteAIWorkers: []*RemoteAIWorker{},
-		liveAIWorkers:   map[net.AIWorker_RegisterAIWorkerServer]*RemoteAIWorker{},
-		RWmutex:         sync.Mutex{},
-		priorityRules:   priorityRules,
-		prioritySpec:    normalizedSpec,
-		priorityFile:    priorityFile,
-		priorityFileSig: priorityFileSig,
+		remoteAIWorkers:     []*RemoteAIWorker{},
+		liveAIWorkers:       map[net.AIWorker_RegisterAIWorkerServer]*RemoteAIWorker{},
+		RWmutex:             sync.Mutex{},
+		priorityRules:       priorityRules,
+		prioritySpec:        normalizedSpec,
+		priorityFile:        priorityFile,
+		priorityFileSig:     priorityFileSig,
+		priorityFileChanges: priorityFileChanges,
+		priorityFileErrors:  priorityFileErrors,
 
 		taskMutex: &sync.RWMutex{},
 		taskChans: make(map[int64]AIWorkerChan),
@@ -479,8 +492,9 @@ func (rwm *RemoteAIWorkerManager) refreshPriorityRulesLocked() {
 		return
 	}
 
+	forceReload := rwm.drainPriorityFileWatchEventsLocked()
 	now := time.Now()
-	if !rwm.priorityFileLastCheck.IsZero() && now.Sub(rwm.priorityFileLastCheck) < remoteAIWorkerPriorityFileCheckInterval {
+	if !forceReload && !rwm.priorityFileLastCheck.IsZero() && now.Sub(rwm.priorityFileLastCheck) < remoteAIWorkerPriorityFileCheckInterval {
 		return
 	}
 	rwm.priorityFileLastCheck = now
@@ -490,7 +504,7 @@ func (rwm *RemoteAIWorkerManager) refreshPriorityRulesLocked() {
 		rwm.logPriorityFileErrorLocked(fmt.Errorf("stat remote AI worker priority file %q: %w", rwm.priorityFile, err))
 		return
 	}
-	if sig == rwm.priorityFileSig {
+	if !forceReload && sig == rwm.priorityFileSig {
 		rwm.priorityFileLastErr = ""
 		return
 	}
@@ -521,6 +535,30 @@ func (rwm *RemoteAIWorkerManager) refreshPriorityRulesLocked() {
 	rwm.priorityFileSig = readSig
 	rwm.priorityFileLastErr = ""
 	glog.Infof("Reloaded remote AI worker priorities file=%s rules=%d", rwm.priorityFile, len(priorityRules))
+}
+
+func (rwm *RemoteAIWorkerManager) drainPriorityFileWatchEventsLocked() bool {
+	changed := false
+	for {
+		select {
+		case _, ok := <-rwm.priorityFileChanges:
+			if !ok {
+				rwm.priorityFileChanges = nil
+				continue
+			}
+			changed = true
+		case err, ok := <-rwm.priorityFileErrors:
+			if !ok {
+				rwm.priorityFileErrors = nil
+				continue
+			}
+			if err != nil {
+				rwm.logPriorityFileErrorLocked(fmt.Errorf("watch remote AI worker priority file %q: %w", rwm.priorityFile, err))
+			}
+		default:
+			return changed
+		}
+	}
 }
 
 func (rwm *RemoteAIWorkerManager) logPriorityFileErrorLocked(err error) {

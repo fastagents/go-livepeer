@@ -2202,11 +2202,22 @@ func startNodesFileWatcher(n *core.LivepeerNode, nodesFile string, lastSpec stri
 	if nodesFile == "" {
 		return
 	}
+	watcher, err := core.WatchReloadFile(nodesFile)
+	if err != nil {
+		glog.Warningf("Could not watch nodes file %q; falling back to stat polling: %v", nodesFile, err)
+	}
 	go func() {
 		ticker := time.NewTicker(nodesFileCheckInterval)
 		defer ticker.Stop()
+		var changes <-chan struct{}
+		var watchErrors <-chan error
+		if watcher != nil {
+			defer watcher.Close()
+			changes = watcher.Changes
+			watchErrors = watcher.Errors
+		}
 		lastErr := ""
-		for range ticker.C {
+		reload := func(force bool) {
 			sig, err := statNodesFile(nodesFile)
 			if err != nil {
 				msg := fmt.Sprintf("stat nodes file %q: %v", nodesFile, err)
@@ -2214,11 +2225,11 @@ func startNodesFileWatcher(n *core.LivepeerNode, nodesFile string, lastSpec stri
 					glog.Errorf("Could not check nodes file: %v", err)
 					lastErr = msg
 				}
-				continue
+				return
 			}
-			if sig == lastSig {
+			if !force && sig == lastSig {
 				lastErr = ""
-				continue
+				return
 			}
 
 			nodes, spec, readSig, err := parseNodesFileWithSignature(nodesFile)
@@ -2229,16 +2240,40 @@ func startNodesFileWatcher(n *core.LivepeerNode, nodesFile string, lastSpec stri
 					lastErr = msg
 				}
 				lastSig = sig
-				continue
+				return
 			}
 			lastErr = ""
 			lastSig = readSig
 			if spec == lastSpec {
-				continue
+				return
 			}
 			n.SetNodes(nodes)
 			lastSpec = spec
 			glog.Infof("Reloaded nodes file=%s nodes=%v", nodesFile, strings.Join(nodes, ","))
+		}
+		for {
+			select {
+			case <-ticker.C:
+				reload(false)
+			case _, ok := <-changes:
+				if !ok {
+					changes = nil
+					continue
+				}
+				reload(true)
+			case err, ok := <-watchErrors:
+				if !ok {
+					watchErrors = nil
+					continue
+				}
+				if err != nil {
+					msg := fmt.Sprintf("watch nodes file %q: %v", nodesFile, err)
+					if msg != lastErr {
+						glog.Errorf("Could not watch nodes file: %v", err)
+						lastErr = msg
+					}
+				}
+			}
 		}
 	}()
 }
