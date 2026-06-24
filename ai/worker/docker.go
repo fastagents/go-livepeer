@@ -804,6 +804,28 @@ func (m *DockerManager) watchContainer(rc *RunnerContainer) {
 				}
 				continue
 			case ERROR:
+				if isBorrowed {
+					if borrowedHardHealthFailures == 0 {
+						borrowedHardHealthFailureStart = time.Now()
+					}
+					borrowedHardHealthFailures++
+					if borrowedHardHealthFailures >= maxBorrowedHardHealthCheckFailures &&
+						time.Since(borrowedHardHealthFailureStart) >= borrowedHardHealthCheckGracePeriod {
+						slog.Error("Borrowed runner semantic ERROR persisted, restarting managed container",
+							slog.String("container", rc.Name),
+							slog.Int("hard_failures", borrowedHardHealthFailures),
+							slog.Duration("duration", borrowedHealthFailureDuration(true, borrowedHealthFailureStart, borrowedHardHealthFailureStart)),
+							slog.String("status", string(status)))
+						failures = maxHealthCheckFailures
+						continue
+					}
+					slog.Warn("Ignoring runner semantic ERROR while container is borrowed",
+						slog.String("container", rc.Name),
+						slog.Int("hard_failures", borrowedHardHealthFailures),
+						slog.Duration("duration", borrowedHealthFailureDuration(true, borrowedHealthFailureStart, borrowedHardHealthFailureStart)),
+						slog.String("status", string(status)))
+					continue
+				}
 				failures = maxHealthCheckFailures
 				slog.Error("Container returned ERROR state, restarting immediately",
 					slog.String("container", rc.Name),

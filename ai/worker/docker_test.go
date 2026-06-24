@@ -975,6 +975,74 @@ func TestDockerManager_watchContainer(t *testing.T) {
 		}
 	})
 
+	t.Run("IgnoreSemanticErrorWhileBorrowed", func(t *testing.T) {
+		mockDockerClient, dockerManager, mockServer, rc := setup()
+		defer mockServer.Close()
+		defer mockDockerClient.AssertExpectations(t)
+		defer mockServer.AssertExpectations(t)
+
+		mockServer.On("ServeHTTP", "GET", "/health", mock.Anything).
+			Return(200, "application/json", `{"status":"ERROR"}`)
+
+		rc.BorrowCtx = context.Background()
+		dockerManager.gpuContainers[rc.GPU] = rc
+		dockerManager.containers[rc.Name] = rc
+
+		mockDockerClient.On("ContainerStop", mock.Anything, rc.Name, expectedContainerStopOptions).Return(nil).Maybe()
+		mockDockerClient.On("ContainerRemove", mock.Anything, rc.Name, mock.Anything).Return(nil).Maybe()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			dockerManager.watchContainer(rc)
+		}()
+
+		time.Sleep(80 * time.Millisecond)
+		mockDockerClient.AssertNotCalled(t, "ContainerRemove", mock.Anything, rc.Name, mock.Anything)
+		require.Contains(t, dockerManager.containers, rc.Name)
+
+		dockerManager.stop()
+		select {
+		case <-done:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("watchContainer did not stop")
+		}
+	})
+
+	t.Run("RecoverBorrowedContainerOnPersistentSemanticError", func(t *testing.T) {
+		defer updateDuringTest(&maxBorrowedHardHealthCheckFailures, 2)()
+		defer updateDuringTest(&borrowedHardHealthCheckGracePeriod, 10*time.Millisecond)()
+
+		mockDockerClient, dockerManager, mockServer, rc := setup()
+		defer mockServer.Close()
+		defer mockDockerClient.AssertExpectations(t)
+		defer mockServer.AssertExpectations(t)
+
+		mockServer.On("ServeHTTP", "GET", "/health", mock.Anything).
+			Return(200, "application/json", `{"status":"ERROR"}`)
+
+		rc.BorrowCtx = context.Background()
+		dockerManager.gpuContainers[rc.GPU] = rc
+		dockerManager.containers[rc.Name] = rc
+
+		mockDockerClient.On("ContainerStop", mock.Anything, rc.Name, expectedContainerStopOptions).Return(nil).Once()
+		mockDockerClient.On("ContainerRemove", mock.Anything, rc.Name, mock.Anything).Return(nil).Once()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			dockerManager.watchContainer(rc)
+		}()
+		select {
+		case <-done:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("watchContainer did not recover persistent semantic ERROR")
+		}
+
+		require.NotContains(t, dockerManager.gpuContainers, rc.GPU)
+		require.NotContains(t, dockerManager.containers, rc.Name)
+	})
+
 	t.Run("RecoverBorrowedContainerOnPersistentPipelineStatusFailure", func(t *testing.T) {
 		defer updateDuringTest(&healthcheckTimeout, 10*time.Millisecond)()
 		defer updateDuringTest(&maxBorrowedHardHealthCheckFailures, 2)()
