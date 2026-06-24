@@ -39,6 +39,7 @@ const containerRemoveTimeout = 30 * time.Second
 const containerCreatorLabel = "creator"
 const containerCreator = "ai-worker"
 const containerCreatorIDLabel = "creator_id"
+const liveVideoToVideoShmSize = 16 * 1024 * 1024 * 1024
 
 var containerTimeout = 3 * time.Minute
 var containerWatchInterval = 5 * time.Second
@@ -458,6 +459,11 @@ func (m *DockerManager) createContainer(ctx context.Context, pipeline string, mo
 			},
 		},
 		RestartPolicy: restartPolicy,
+	}
+	if pipeline == "live-video-to-video" {
+		// Live video runners use torch multiprocessing/temp files; Docker's
+		// default 64 MiB shm has caused avoidable health failures.
+		hostConfig.ShmSize = liveVideoToVideoShmSize
 	}
 
 	resp, err := m.dockerClient.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, containerName)

@@ -229,6 +229,38 @@ func TestDockerManager_Warm(t *testing.T) {
 	mockDockerClient.AssertExpectations(t)
 }
 
+func TestDockerManager_WarmLiveVideoUsesExpandedShm(t *testing.T) {
+	mockDockerClient := new(MockDockerClient)
+	dockerManager := createDockerManager(mockDockerClient)
+
+	ctx := context.Background()
+	containerID := "container1"
+
+	defer updateDuringTest(&dockerWaitUntilRunningFunc, func(ctx context.Context, client DockerClient, containerID string, pollingInterval time.Duration) error {
+		return nil
+	})()
+	defer updateDuringTest(&runnerWaitUntilReadyFunc, func(ctx context.Context, client *ClientWithResponses, pollingInterval time.Duration) (bool, error) {
+		return false, nil
+	})()
+
+	mockDockerClient.On(
+		"ContainerCreate",
+		mock.Anything,
+		mock.Anything,
+		mock.MatchedBy(func(hostConfig *container.HostConfig) bool {
+			return hostConfig != nil && hostConfig.ShmSize == liveVideoToVideoShmSize
+		}),
+		mock.Anything,
+		mock.Anything,
+		mock.Anything,
+	).Return(container.CreateResponse{ID: containerID}, nil)
+	mockDockerClient.On("ContainerStart", mock.Anything, containerID, mock.Anything).Return(nil)
+
+	err := dockerManager.Warm(ctx, "live-video-to-video", "streamdiffusion-sdxl", OptimizationFlags{})
+	require.NoError(t, err)
+	mockDockerClient.AssertExpectations(t)
+}
+
 func TestDockerManager_Stop(t *testing.T) {
 	MockDockerClient := new(MockDockerClient)
 	dockerManager := createDockerManager(MockDockerClient)
