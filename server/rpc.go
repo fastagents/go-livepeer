@@ -387,7 +387,10 @@ func getOrchestrator(orch Orchestrator, req *net.OrchestratorRequest) (*net.Orch
 	}
 
 	if err := checkLiveVideoToVideoCapacity(orch, req); err != nil {
-		return nil, fmt.Errorf("Invalid orchestrator request: %v", err)
+		if len(orch.Nodes()) == 0 {
+			return nil, fmt.Errorf("Invalid orchestrator request: %v", err)
+		}
+		return orchestratorInfoWithCaps(orch, addr, "", "", req.Capabilities)
 	}
 	return orchestratorInfoWithCaps(orch, addr, serviceURI, "", req.Capabilities)
 }

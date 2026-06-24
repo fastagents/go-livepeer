@@ -1421,23 +1421,33 @@ func TestGetOrchestrator_NoLiveVideoCapacity_WithAndWithoutServiceURI(t *testing
 		},
 	}
 
-	// Case 1: non-empty ServiceURI -> capacity check should run and fail
+	// Case 1: non-empty ServiceURI with advertised child nodes should still
+	// return discovery info when the carrier's local live-AI capacity is busy.
+	// The carrier itself is cleared from Transcoder while child nodes remain.
 	orch1 := &mockAICapacityOrch{nodes: []string{"node1"}}
 	orch1.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
 	orch1.On("ServiceURI").Return(mustParseUrl(t, "http://someuri.com"))
 	orch1.On("Address").Return(ethcommon.Address{})
-	// Other calls won't be reached because capacity check should fail, but set sensible defaults
-	orch1.On("GetCapabilitiesPrices", mock.Anything).Return([]*net.PriceInfo{}, nil)
-	orch1.On("PriceInfo", mock.Anything).Return(nil, nil)
 	orch1.On("TicketParams", mock.Anything, mock.Anything).Return(nil, nil)
 	orch1.On("AuthToken", mock.Anything, mock.Anything).Return(&net.AuthToken{})
 
-	_, err := getOrchestrator(orch1, &net.OrchestratorRequest{Capabilities: caps})
+	oInfo, err := getOrchestrator(orch1, &net.OrchestratorRequest{Capabilities: caps})
+	assert.Nil(t, err)
+	assert.Equal(t, "", oInfo.Transcoder)
+	assert.Equal(t, []string{"node1"}, oInfo.Nodes)
+
+	// Case 2: no advertised child nodes still fails when local live-AI
+	// capacity is exhausted.
+	orchNoNodes := &mockAICapacityOrch{}
+	orchNoNodes.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	orchNoNodes.On("ServiceURI").Return(mustParseUrl(t, "http://someuri.com"))
+
+	_, err = getOrchestrator(orchNoNodes, &net.OrchestratorRequest{Capabilities: caps})
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "Invalid orchestrator request")
 	}
 
-	// Case 2: empty ServiceURI -> capacity check is skipped; should return orchestrator info and nodes
+	// Case 3: empty ServiceURI -> capacity check is skipped; should return orchestrator info and nodes
 	orch2 := &mockAICapacityOrch{nodes: []string{"node1"}}
 	orch2.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
 	// Return an empty URL so ServiceURI().String() == ""
@@ -1448,7 +1458,7 @@ func TestGetOrchestrator_NoLiveVideoCapacity_WithAndWithoutServiceURI(t *testing
 	orch2.On("TicketParams", mock.Anything, mock.Anything).Return(nil, nil)
 	orch2.On("AuthToken", mock.Anything, mock.Anything).Return(&net.AuthToken{})
 
-	oInfo, err := getOrchestrator(orch2, &net.OrchestratorRequest{Capabilities: caps})
+	oInfo, err = getOrchestrator(orch2, &net.OrchestratorRequest{Capabilities: caps})
 	assert.Nil(t, err)
 	// ServiceURI was empty, so Transcoder should be empty string and Nodes should include our node
 	assert.Equal(t, "", oInfo.Transcoder)
